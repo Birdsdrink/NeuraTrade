@@ -1,0 +1,41 @@
+# ── Secrets ──────────────────────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+
+# ── Python ───────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+*.log
+
+# ── Node / Expo / React Native ──────────────────────────────────────────────
+node_modules/
+.expo/
+dist/
+web-build/
+*.tsbuildinfo
+
+# ── Android / iOS native build artifacts ────────────────────────────────────
+mobile/android/.gradle/
+mobile/android/build/
+mobile/android/app/build/
+mobile/android/local.properties
+mobile/ios/Pods/
+mobile/ios/build/
+*.jks
+*.keystore
+
+# ── Editor / OS ─────────────────────────────────────────────────────────────
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# ── Local data dumps & scratch ──────────────────────────────────────────────
+backend/markets_dump.json
+*.tmp

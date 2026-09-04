@@ -1,0 +1,14 @@
+# ── Web framework ────────────────────────────────────────────────────────────
+fastapi==0.141.1
+uvicorn[standard]==0.52.4
+pydantic==2.13.4
+
+# ── HTTP / WebSocket clients (Deriv feed + AI providers) ────────────────────
+httpx==0.28.1
+websockets==17.1
+
+# ── Config ───────────────────────────────────────────────────────────────────
+python-dotenv==1.2.3
+
+# ── Vercel serverless adapter (deployment only; harmless locally) ───────────
+mangum==0.39.0

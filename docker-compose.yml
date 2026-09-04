@@ -1,0 +1,33 @@
+version: '3.8'
+services:
+  postgres:
+    image: postgres:15
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: deriv
+      POSTGRES_PASSWORD: deriv
+      POSTGRES_DB: deriv_ai
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+  backend:
+    build: ./backend
+    depends_on:
+      - postgres
+    environment:
+      DATABASE_URL: postgresql://deriv:deriv@postgres:5432/deriv_ai
+      HF_API_TOKEN: ""
+      QWEN_MODEL: "Qwen/Qwen2.5-VL-7B-Instruct"
+      DERIV_WS_URL: "wss://ws.binaryws.com/websockets/v3?app_id=1089"
+    ports:
+      - "8000:8000"
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "5173:5173"
+
+volumes:
+  db-data:

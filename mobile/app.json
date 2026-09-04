@@ -1,0 +1,23 @@
+{
+  "expo": {
+    "name": "NeuraTrade",
+    "slug": "neuratrade",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "splash": {
+      "backgroundColor": "#0A0913"
+    },
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.neuratrade.app"
+    },
+    "android": {
+      "package": "com.neuratrade.app"
+    },
+    "plugins": []
+  }
+}
