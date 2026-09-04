@@ -11,4 +11,4 @@ websockets==17.1
 python-dotenv==1.2.3
 
 # ── Vercel serverless adapter (deployment only; harmless locally) ───────────
-mangum==0.39.0
+mangum==0.22.0
