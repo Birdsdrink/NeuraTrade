@@ -5,13 +5,16 @@ import COLORS from '../../theme/colors';
 import AppHeader from '../../components/AppHeader';
 import { Market } from '../../domain/entities/Market';
 import { useMarketDetail } from '../../features/markets/hooks/useMarketDetail';
+import { useLiveCandles } from '../../features/markets/hooks/useLiveCandles';
 import { analyseMarket } from '../../features/markets/services/marketAnalysis';
 import { useMarkets } from '../../features/markets/hooks/useMarkets';
 
 const TIMEFRAMES: Record<string, number> = { '1m': 60, '5m': 300, '15m': 900, '30m': 1800, '1H': 3600, '4H': 14400, '1D': 86400 };
 
 function formatPrice(price: number) {
-  return price >= 1000 ? price.toLocaleString(undefined, { maximumFractionDigits: 2 }) : price >= 1 ? price.toFixed(4) : price.toFixed(6);
+  // Forex-range prices keep 5 decimals so tick-level movement is visible in
+  // the live analysis statement; large instruments stay at 2 decimals.
+  return price >= 1000 ? price.toLocaleString(undefined, { maximumFractionDigits: 2 }) : price >= 1 ? price.toFixed(5) : price.toFixed(6);
 }
 
 export default function AIAnalysisScreen({ navigation, market, timeframe }: { navigation: (screen: 'Markets' | 'MarketDetail' | 'AIAnalysis' | 'Watchlist' | 'FundamentalAnalysis' | 'Settings') => void; market: Market | null; timeframe: string }) {
@@ -25,7 +28,10 @@ export default function AIAnalysisScreen({ navigation, market, timeframe }: { na
   }, [availableMarkets, selectedMarket]);
   const symbol = selectedMarket?.backendSymbol ?? selectedMarket?.symbol ?? '';
   const displayName = selectedMarket?.displayName ?? selectedMarket?.symbol ?? 'Market';
-  const { data: candles = [], isLoading, isError, refetch } = useMarketDetail(symbol, TIMEFRAMES[selectedTimeframe] ?? 3600);
+  // REST fallback refreshes every 5 seconds; the live WebSocket stream below
+  // recomputes the analysis on every tick when realtime is available.
+  const { data: historicalCandles = [], isLoading, isError, refetch } = useMarketDetail(symbol, TIMEFRAMES[selectedTimeframe] ?? 3600, 100, 5);
+  const { candles } = useLiveCandles(symbol, TIMEFRAMES[selectedTimeframe] ?? 3600, historicalCandles);
   const analysis = analyseMarket(candles);
   const directionColor = analysis?.direction === 'Bullish' ? COLORS.green : COLORS.red;
 
@@ -59,7 +65,6 @@ export default function AIAnalysisScreen({ navigation, market, timeframe }: { na
         })}
       </ScrollView>
 
-      <Text style={{ color: COLORS.textMuted, fontSize: 11, marginTop: -8, marginBottom: 16 }}>Live analysis refreshes every 30 seconds.</Text>
 
       {isLoading ? <Text style={{ color: COLORS.textSecondary }}>Loading {selectedTimeframe} market data…</Text> : null}
       {isError ? <TouchableOpacity onPress={() => refetch()}><Text style={{ color: COLORS.textSecondary }}>Analysis data is unavailable. Tap to retry.</Text></TouchableOpacity> : null}

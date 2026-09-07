@@ -29,6 +29,14 @@ const ACCENT = COLORS.blue;
 // Fade the accent line out near the far left/right edges of the bar
 const FADE_W = Math.min(72, BAR_WIDTH * 0.16);
 const BAR_COLOR = '#0a0a0c';
+const SCREEN_BG = COLORS.bgPrimary; // used for the notch "cutout" behind the floating circle
+
+// How far the active icon raises up out of the bar (into the floating circle)
+const ICON_RAISE = 26;
+
+// Notch / floating circle geometry
+const NOTCH_SIZE = 58;
+const CIRCLE_SIZE = 46;
 
 const ITEMS: { tab: Tab; screen: Screen; label: string; icon: (color: string) => React.ReactNode }[] = [
   { tab: 'Markets', screen: 'Markets', label: 'Markets', icon: (color) => <Ionicons name="home-outline" size={22} color={color} /> },
@@ -38,12 +46,14 @@ const ITEMS: { tab: Tab; screen: Screen; label: string; icon: (color: string) =>
   { tab: 'Settings', screen: 'Settings', label: 'Settings', icon: (color) => <Feather name="settings" size={21} color={color} /> },
 ];
 
-// SVG path for the accent line.
-// The center of the "bump" sits at X = 0 and the path extends far left/right
-// so the whole line stays continuous while it slides under the active tab.
-const LINE_Y = 64; // Y of the straight bottom line
-const BUMP_PEAK_Y = 12; // Highest point of the curve
-const CURVE_WIDTH = 44; // Half width of the bump base — wide enough for long labels to sit clearly between its legs
+// SVG path for the accent line — flipped to the TOP of the dock ("upside down" vs the old bottom line).
+// The center of the "bump" sits at X = 0 and the path extends far left/right so the whole
+// line stays continuous while it slides under the active tab.
+// The bump itself is also rotated upside down: instead of arching upward, it DIPS DOWNWARD
+// into the bar beneath the active tab (the raised icon floats above the valley).
+const LINE_Y = 12; // Y of the straight line, measured from the dock's top edge
+const BUMP_PEAK_Y = 43; // the bump dips down into the bar — between the circle bottom (28) and the label text (~49)
+const CURVE_WIDTH = 54; // Half width of the bump base — wider than the circle (46) so it sits well inside the arc
 // Bezier control points scaled proportionally to the base width
 const CURVE_C1 = CURVE_WIDTH * 0.469;
 const CURVE_C2 = CURVE_WIDTH * 0.781;
@@ -57,15 +67,18 @@ const SVG_PATH = `
 `;
 
 export default function BottomNavigation({ activeTab, setActiveTab, setCurrentScreen }: Props) {
-  const activeIndex = ITEMS.findIndex((item) => item.tab === activeTab);
+  const activeIndex = Math.max(0, ITEMS.findIndex((item) => item.tab === activeTab));
 
-  // slideAnim tracks the center X of the active tab across the full-width strip
-  const slideAnim = useRef(new Animated.Value(TAB_WIDTH / 2 + activeIndex * TAB_WIDTH)).current;
+  // One animated value tracks the active INDEX; everything else interpolates from it:
+  // - the accent-line bump slides to the center of the active tab
+  // - the notch + floating circle slide beneath the active tab
+  // - the active icon raises up into the floating circle
+  const slideVal = useRef(new Animated.Value(activeIndex)).current;
   const popAnim = useRef(new Animated.Value(1)).current;
 
   useEffect(() => {
-    Animated.spring(slideAnim, {
-      toValue: TAB_WIDTH / 2 + activeIndex * TAB_WIDTH,
+    Animated.spring(slideVal, {
+      toValue: activeIndex,
       tension: 60,
       friction: 10,
       useNativeDriver: false,
@@ -79,13 +92,25 @@ export default function BottomNavigation({ activeTab, setActiveTab, setCurrentSc
       friction: 6,
       useNativeDriver: false,
     }).start();
-  }, [activeIndex, slideAnim, popAnim]);
+  }, [activeIndex, slideVal, popAnim]);
+
+  // Accent line translateX: bump center = center of the active tab
+  const lineTranslateX = slideVal.interpolate({
+    inputRange: ITEMS.map((_, i) => i),
+    outputRange: ITEMS.map((_, i) => TAB_WIDTH / 2 + i * TAB_WIDTH),
+  });
+
+  // Notch + floating circle translateX: left edge of the active tab
+  const indicatorTranslateX = slideVal.interpolate({
+    inputRange: ITEMS.map((_, i) => i),
+    outputRange: ITEMS.map((_, i) => i * TAB_WIDTH),
+  });
 
   const select = (item: (typeof ITEMS)[number], index: number) => {
     setActiveTab(item.tab);
     setCurrentScreen(item.screen);
-    Animated.spring(slideAnim, {
-      toValue: TAB_WIDTH / 2 + index * TAB_WIDTH,
+    Animated.spring(slideVal, {
+      toValue: index,
       tension: 60,
       friction: 10,
       useNativeDriver: false,
@@ -95,46 +120,63 @@ export default function BottomNavigation({ activeTab, setActiveTab, setCurrentSc
   return (
     <View pointerEvents="box-none" style={styles.wrapper}>
       <View style={styles.tabBarContainer}>
-        {/* Tabs area */}
-        <View style={styles.tabsContainer}>
-          {/* Animated SVG continuous accent line */}
-          <Animated.View
-            style={[
-              { position: 'absolute', top: 0, bottom: 0, left: 0, right: 0 },
-              { transform: [{ translateX: slideAnim }] },
-            ]}
-          >
-            <Svg width="1" height={BAR_HEIGHT} style={{ overflow: 'visible' }}>
-              {/* Soft glow */}
-              <Path d={SVG_PATH} stroke={ACCENT} strokeWidth={6} strokeOpacity={0.3} fill="none" />
-              {/* Core line */}
-              <Path d={SVG_PATH} stroke={ACCENT} strokeWidth={2} fill="none" />
-            </Svg>
-          </Animated.View>
-
-          {/* Static fade overlays at both ends (dock color, over the line) */}
-          <Svg
-            width={BAR_WIDTH}
-            height={BAR_HEIGHT}
-            style={{ position: 'absolute', top: 0, left: 0 }}
-            pointerEvents="none"
-          >
-            <Defs>
-              <LinearGradient id="fadeLeft" x1="0" y1="0" x2={FADE_W} y2="0" gradientUnits="userSpaceOnUse">
-                <Stop offset="0" stopColor={BAR_COLOR} stopOpacity="1" />
-                <Stop offset="1" stopColor={BAR_COLOR} stopOpacity="0" />
-              </LinearGradient>
-              <LinearGradient id="fadeRight" x1={BAR_WIDTH - FADE_W} y1="0" x2={BAR_WIDTH} y2="0" gradientUnits="userSpaceOnUse">
-                <Stop offset="0" stopColor={BAR_COLOR} stopOpacity="0" />
-                <Stop offset="1" stopColor={BAR_COLOR} stopOpacity="1" />
-              </LinearGradient>
-            </Defs>
-            <Rect x="0" y="0" width={FADE_W} height={BAR_HEIGHT} fill="url(#fadeLeft)" />
-            <Rect x={BAR_WIDTH - FADE_W} y="0" width={FADE_W} height={BAR_HEIGHT} fill="url(#fadeRight)" />
+        {/* Animated SVG continuous accent line (top of the dock) */}
+        <Animated.View
+          style={[
+            { position: 'absolute', top: 0, bottom: 0, left: 0, right: 0 },
+            { transform: [{ translateX: lineTranslateX }] },
+          ]}
+        >
+          <Svg width="1" height={BAR_HEIGHT} style={{ overflow: 'visible' }}>
+            {/* Soft glow */}
+            <Path d={SVG_PATH} stroke={ACCENT} strokeWidth={6} strokeOpacity={0.3} fill="none" />
+            {/* Core line */}
+            <Path d={SVG_PATH} stroke={ACCENT} strokeWidth={2} fill="none" />
           </Svg>
+        </Animated.View>
 
+        {/* Static fade overlays at both ends (dock color, over the line) */}
+        <Svg
+          width={BAR_WIDTH}
+          height={BAR_HEIGHT}
+          style={{ position: 'absolute', top: 0, left: 0 }}
+          pointerEvents="none"
+        >
+          <Defs>
+            <LinearGradient id="fadeLeft" x1="0" y1="0" x2={FADE_W} y2="0" gradientUnits="userSpaceOnUse">
+              <Stop offset="0" stopColor={BAR_COLOR} stopOpacity="1" />
+              <Stop offset="1" stopColor={BAR_COLOR} stopOpacity="0" />
+            </LinearGradient>
+            <LinearGradient id="fadeRight" x1={BAR_WIDTH - FADE_W} y1="0" x2={BAR_WIDTH} y2="0" gradientUnits="userSpaceOnUse">
+              <Stop offset="0" stopColor={BAR_COLOR} stopOpacity="0" />
+              <Stop offset="1" stopColor={BAR_COLOR} stopOpacity="1" />
+            </LinearGradient>
+          </Defs>
+          <Rect x="0" y="0" width={FADE_W} height={BAR_HEIGHT} fill="url(#fadeLeft)" />
+          <Rect x={BAR_WIDTH - FADE_W} y="0" width={FADE_W} height={BAR_HEIGHT} fill="url(#fadeRight)" />
+        </Svg>
+
+        {/* Sliding notch + floating circle (holds the raised active icon) */}
+        <Animated.View
+          style={[styles.slidingIndicatorContainer, { transform: [{ translateX: indicatorTranslateX }] }]}
+        >
+          <View style={styles.notchCutout}>
+            <View style={styles.floatingCircle} />
+          </View>
+        </Animated.View>
+
+        {/* Tab buttons */}
+        <View style={styles.tabsContainer}>
           {ITEMS.map((item, index) => {
             const isActive = item.tab === activeTab;
+
+            // Active icon raises up out of the bar into the floating circle
+            const translateY = slideVal.interpolate({
+              inputRange: [index - 1, index, index + 1],
+              outputRange: [0, -ICON_RAISE, 0],
+              extrapolate: 'clamp',
+            });
+
             return (
               <TouchableOpacity
                 key={item.tab}
@@ -144,11 +186,13 @@ export default function BottomNavigation({ activeTab, setActiveTab, setCurrentSc
                 activeOpacity={0.8}
                 onPress={() => select(item, index)}
               >
-                <View style={styles.iconContainer}>
-                  <Animated.View style={[isActive && { transform: [{ scale: popAnim }] }]}>
-                    {item.icon(isActive ? ACCENT : '#a0a0a0')}
-                  </Animated.View>
-                </View>
+                <Animated.View style={{ transform: [{ translateY }] }}>
+                  <View style={styles.iconContainer}>
+                    <Animated.View style={[isActive && { transform: [{ scale: popAnim }] }]}>
+                      {item.icon(isActive ? ACCENT : '#a0a0a0')}
+                    </Animated.View>
+                  </View>
+                </Animated.View>
 
                 <Text numberOfLines={1} style={[styles.tabText, isActive && styles.tabTextActive]}>
                   {item.label}
@@ -173,7 +217,7 @@ const styles = StyleSheet.create({
     width: '100%',
     height: DOCK_HEIGHT,
     position: 'relative',
-    backgroundColor: '#0a0a0c',
+    backgroundColor: BAR_COLOR,
     borderRadius: DOCK_RADIUS,
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.06)',
@@ -182,7 +226,43 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.35,
     shadowRadius: 20,
     elevation: 20,
-    overflow: 'hidden', // keeps the long SVG line inside the dock
+    // overflow is visible so the notch/floating circle can poke above the dock's top edge.
+    // The accent line is erased by the edge fades before it reaches the rounded corners,
+    // so nothing bleeds out of the pill.
+  },
+  slidingIndicatorContainer: {
+    position: 'absolute',
+    top: 0,
+    width: TAB_WIDTH,
+    height: BAR_HEIGHT,
+    alignItems: 'center',
+    zIndex: 1,
+  },
+  notchCutout: {
+    // Circle in the screen background color — the "hole" in the bar behind the floating circle
+    width: NOTCH_SIZE,
+    height: NOTCH_SIZE,
+    borderRadius: NOTCH_SIZE / 2,
+    backgroundColor: SCREEN_BG,
+    position: 'absolute',
+    top: -(NOTCH_SIZE / 2) + 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  floatingCircle: {
+    // The actual floating circle holding the raised active icon
+    width: CIRCLE_SIZE,
+    height: CIRCLE_SIZE,
+    borderRadius: CIRCLE_SIZE / 2,
+    backgroundColor: BAR_COLOR,
+    borderWidth: 1.5,
+    borderColor: 'rgba(255,255,255,0.12)',
+    shadowColor: ACCENT,
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.45,
+    shadowRadius: 12,
+    elevation: 8,
+    marginTop: 6,
   },
   tabsContainer: {
     position: 'absolute',
@@ -191,14 +271,14 @@ const styles = StyleSheet.create({
     right: 0,
     height: BAR_HEIGHT,
     flexDirection: 'row',
+    zIndex: 2,
   },
   tab: {
     width: TAB_WIDTH,
     height: '100%',
     justifyContent: 'center',
     alignItems: 'center',
-    zIndex: 2,
-    paddingTop: 4,
+    paddingTop: 8,
   },
   iconContainer: {
     marginBottom: 6,

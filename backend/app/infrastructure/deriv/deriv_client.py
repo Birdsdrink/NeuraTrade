@@ -61,7 +61,12 @@ class DerivWebSocketClient:
                     data = msg
                 for cb in list(self._listeners):
                     try:
-                        asyncio.create_task(cb(data))
+                        res = cb(data)
+                        # Listeners may be sync (return None) or async (return a
+                        # coroutine). Never pass None to create_task — that raises
+                        # "a coroutine was expected" and kills the whole recv loop.
+                        if asyncio.iscoroutine(res):
+                            asyncio.create_task(res)
                     except Exception:
                         logger.exception("Listener raised when scheduling task")
         except Exception:
@@ -74,6 +79,11 @@ class DerivWebSocketClient:
             self._ws = None
             if not self._closed:
                 asyncio.create_task(self.connect())
+
+    @property
+    def is_connected(self) -> bool:
+        """True when the WebSocket is currently open and ready for requests."""
+        return self._connected.is_set() and self._ws is not None and not self._closed
 
     async def send(self, payload: Dict[str, Any]):
         await self._connected.wait()

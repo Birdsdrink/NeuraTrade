@@ -7,7 +7,12 @@ from fastapi import Request
 import asyncio
 import logging
 from ..infrastructure.deriv.deriv_market_data import get_fallback_symbols
-from ..infrastructure.ai.vision_service import analyse_chart_image, analyse_candles
+from ..infrastructure.ai.vision_service import (
+    analyse_chart_image,
+    analyse_candles,
+    analyse_chart_image_dashboard,
+    analyse_candles_dashboard,
+)
 from ..infrastructure.ai.fundamental_service import analyse_fundamental
 
 router = APIRouter()
@@ -162,9 +167,79 @@ async def chart_analysis(
                   3600: "1H", 14400: "4H", 86400: "1D"}
         tf_label = tf_map.get(body.timeframe_seconds, f"{body.timeframe_seconds}s")
         result = await analyse_candles(body.symbol, tf_label, candle_dicts)
+        if candle_dicts and all(c.get("volume") == -1 for c in candle_dicts):
+            result.setdefault("warnings", []).append(
+                "Offline demo data (Deriv feed unreachable). Levels are illustrative."
+            )
     else:
         return {"error": "Provide either image_base64 or symbol."}
     return result
+
+
+@router.post("/chart-analysis/dashboard")
+async def chart_analysis_dashboard(
+    body: ChartAnalysisRequest,
+    request: Request,
+):
+    """Structured "AI Pro" dashboard analysis of a chart image or instrument.
+
+    Returns the full dashboard payload consumed by the Technicals "Upload" tab:
+    confidence gauge, insights, game plan, risk management, multi-timeframe,
+    SMC levels, and the detailed breakdown accordions.
+    Always returns a well-formed dashboard payload (never a bare 500) so the
+    mobile UI can render a graceful degraded state with the failure reason.
+    """
+    tf_map = {60: "1m", 300: "5m", 900: "15m", 1800: "30m",
+              3600: "1H", 14400: "4H", 86400: "1D"}
+    try:
+        if body.image_base64:
+            return await analyse_chart_image_dashboard(
+                body.image_base64,
+                mime_type=body.mime_type,
+                extra_prompt=body.extra_prompt,
+            )
+        if body.symbol:
+            service: MarketDataService = request.app.state.market_data_service
+            candles = await service.get_historical(
+                body.symbol, body.timeframe_seconds, body.candle_count
+            )
+            candle_dicts = [c.__dict__ for c in candles]
+            tf_label = tf_map.get(body.timeframe_seconds, f"{body.timeframe_seconds}s")
+            payload = await analyse_candles_dashboard(body.symbol, tf_label, candle_dicts)
+            return payload
+        return {"error": "Provide either image_base64 or symbol."}
+    except Exception as exc:
+        logger.exception("Dashboard analysis failed")
+        return _DASHBOARD_FALLBACK
+
+
+_DASHBOARD_FALLBACK = {
+    "score": 0,
+    "status": "ANALYSIS UNAVAILABLE",
+    "riskLevel": "Medium",
+    "confLevel": "Low",
+    "insights": {"trend": "Neutral", "momentum": "Neutral", "liqBias": "Neutral", "sentiment": "Cautious"},
+    "gamePlan": "No trade. Try again shortly.",
+    "riskManagement": {"rrRatio": "-", "stopLoss": "-", "positionSize": "Conservative"},
+    "tradePlan": {
+        "action": "WAIT",
+        "whenToBuy": "-",
+        "whenToSell": "-",
+        "whenToExit": "-",
+        "stopLoss": "-",
+        "rrRatio": "-",
+        "positionSize": "Conservative",
+    },
+    "multiTimeframe": {"weekly": "Neutral", "daily": "Neutral", "h4": "Consolidating", "h1": "Range"},
+    "smc": {"fvg": "-", "bullishOb": "-", "bearishOb": "-", "buySideLiq": "-", "sellSideLiq": "-"},
+    "breakdown": [
+        {"title": "Trend Analysis", "content": "No clear signal."},
+        {"title": "Support & Resistance Levels", "content": "No clear levels."},
+        {"title": "Volume Analysis", "content": "No volume read."},
+        {"title": "Candlestick Patterns", "content": "No clear pattern."},
+        {"title": "Momentum Indicators", "content": "No momentum read."},
+    ],
+}
 
 
 # ── Fundamental Analysis ────────────────────────────────────────────────────

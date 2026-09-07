@@ -10,6 +10,8 @@ import re
 import json
 import logging
 import asyncio
+from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from typing import Optional
 from xml.etree import ElementTree
 
@@ -75,6 +77,22 @@ _COMMODITY_NAMES = {
 
 _NEWS_FEED_URL = "https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
 _MAX_NEWS = 8
+# Only news published within this window counts as "today's news"; the
+# sentiment verdict is based on these articles only.
+_NEWS_AGE_HOURS = 24
+
+
+def _parse_rss_date(pub_date: str) -> Optional[datetime]:
+    """Parse an RFC-2822 RSS pubDate into a timezone-aware datetime."""
+    if not pub_date:
+        return None
+    try:
+        dt = parsedate_to_datetime(pub_date)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except Exception:
+        return None
 
 
 def _build_search_queries(symbol: str, display_name: str) -> list[str]:
@@ -127,11 +145,22 @@ async def fetch_news(symbol: str, display_name: str = "") -> list[dict]:
                             "title": title,
                             "source": source,
                             "date": pub_date,
+                            "published_at": _parse_rss_date(pub_date),
                             "summary": description[:300] if description else "",
                             "url": link,
                         })
             except Exception as e:
                 logger.warning("Failed to fetch news for query '%s': %s", query, e)
+
+    # Keep only news from the current day / last 24 hours so the sentiment
+    # verdict reflects today's headlines, not stale articles.
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=_NEWS_AGE_HOURS)
+    recent = [a for a in articles if a.get("published_at") is not None and a["published_at"] >= cutoff]
+    if recent:
+        articles = recent
+    # Drop the internal datetime field before returning
+    for a in articles:
+        a.pop("published_at", None)
 
     return articles[:_MAX_NEWS]
 
@@ -141,14 +170,16 @@ async def fetch_news(symbol: str, display_name: str = "") -> list[dict]:
 FUNDAMENTAL_PROMPT = """\
 You are an expert fundamental analyst for forex, commodities, indices, and crypto markets.
 
-Given the following recent news headlines and summaries for {instrument}, provide a \
-comprehensive fundamental analysis.
+Today's date is {today}.
 
-Recent News:
+Given the following news headlines and summaries for {instrument} published within the \
+last 24 hours, provide a comprehensive fundamental analysis based on TODAY's news.
+
+Today's News:
 {news_text}
 
 Analyze:
-1. Overall market sentiment from the news
+1. Overall market sentiment from today's news
 2. Key economic themes affecting this instrument
 3. Central bank policy implications (if applicable)
 4. Geopolitical factors
@@ -185,10 +216,10 @@ Rules:
 - sentiment_score: -100 (extreme bearish) to +100 (extreme bullish)
 - confidence: 0 to 100
 - relevance: 0 to 10
+- Base the verdict ONLY on the news listed above (published within the last 24 hours)
 - If there are few or no relevant news articles, say so and lower confidence
 - Do NOT invent news events that weren't provided
 - Be concise but thorough in analysis
-- Factor in whether the news is recent (last 24h) vs older
 """
 
 ANALYSIS_SCHEMA = json.dumps({
@@ -377,6 +408,8 @@ async def analyse_fundamental(
     news_lines = []
     for i, a in enumerate(articles, 1):
         line = f"{i}. [{a['source']}] {a['title']}"
+        if a.get("date"):
+            line += f" ({a['date']})"
         if a["summary"]:
             line += f"\n   Summary: {a['summary']}"
         news_lines.append(line)
@@ -388,6 +421,7 @@ async def analyse_fundamental(
         instrument=instrument_name,
         news_text=news_text,
         schema=ANALYSIS_SCHEMA,
+        today=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
     )
 
     result = await _call_ai(prompt)

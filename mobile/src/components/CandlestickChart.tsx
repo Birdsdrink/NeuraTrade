@@ -1,71 +1,179 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Animated, LayoutChangeEvent, Text, View } from 'react-native';
+import React, { useMemo } from 'react';
+import { View } from 'react-native';
+import Svg, { Line, Rect, Circle, Text as SvgText, G } from 'react-native-svg';
 import { Candle } from '../domain/entities/Candle';
 import COLORS from '../theme/colors';
 
-const CHART_PADDING = { top: 30, right: 58, bottom: 20, left: 12 };
+const CHART_BG = COLORS.bgPrimary;
+const GRID_COLOR = COLORS.subtleBorder;
+const TEXT_COLOR = COLORS.textMuted;
+const WICK_COLOR = '#A7B1C2';
+const BULLISH_COLOR = COLORS.green;
+const BEARISH_COLOR = COLORS.red;
 
-function formatPrice(value: number) {
-  if (value >= 1000) return value.toLocaleString(undefined, { maximumFractionDigits: 2 });
+const LEFT_PADDING = 50;
+const RIGHT_PADDING = 48;
+const TOP_PADDING = 12;
+const BOTTOM_PADDING = 8;
+const CHART_HEIGHT = 320;
+const MAX_VISIBLE = 80;
+const CANDLE_BODY_RATIO = 0.45;
+const CANDLE_WIDTH_MAX = 10;
+
+function formatPrice(value: number): string {
+  if (value >= 1000) return value.toLocaleString(undefined, { maximumFractionDigits: 0 });
   if (value >= 1) return value.toFixed(4);
   return value.toFixed(6);
 }
 
-export default function CandlestickChart({ candles, livePrice, isLive }: { candles: Candle[]; livePrice?: number | null; isLive?: boolean }) {
-  const [size, setSize] = useState({ width: 0, height: 0 });
-  const priceLineY = useRef(new Animated.Value(0)).current;
-  const visibleCandles = useMemo(() => candles.slice(-48), [candles]);
-  const range = useMemo(() => {
-    const lows = visibleCandles.map((candle) => candle.low);
-    const highs = visibleCandles.map((candle) => candle.high);
-    const lowest = Math.min(...lows);
-    const highest = Math.max(...highs);
-    const padding = Math.max((highest - lowest) * 0.08, highest * 0.0001);
-    return { min: lowest - padding, max: highest + padding };
-  }, [visibleCandles]);
 
-  const onLayout = ({ nativeEvent }: LayoutChangeEvent) => setSize(nativeEvent.layout);
-  const plotWidth = Math.max(0, size.width - CHART_PADDING.left - CHART_PADDING.right);
-  const plotHeight = Math.max(0, size.height - CHART_PADDING.top - CHART_PADDING.bottom);
-  const priceToY = (price: number) => CHART_PADDING.top + ((range.max - price) / (range.max - range.min || 1)) * plotHeight;
-  const candleSpace = plotWidth / Math.max(visibleCandles.length, 1);
-  const bodyWidth = Math.max(3, Math.min(12, candleSpace * 0.62));
-  const lastCandle = visibleCandles[visibleCandles.length - 1];
-  const lastPriceY = lastCandle ? priceToY(lastCandle.close) : 0;
-  useEffect(() => {
-    if (!lastCandle || size.height === 0) return;
-    Animated.timing(priceLineY, { toValue: lastPriceY, duration: 260, useNativeDriver: false }).start();
-  }, [lastCandle, lastPriceY, priceLineY, size.height]);
+function normaliseCandles(raw: Candle[]): Candle[] {
+  if (raw.length === 0) return [];
+  const sorted = [...raw].sort((a, b) => a.timestamp - b.timestamp);
+  const out: Candle[] = [];
+  for (let i = 0; i < sorted.length; i++) {
+    const c = sorted[i];
+    const prevClose = out.length > 0 ? out[out.length - 1].close : c.open;
+    const open = prevClose;
+    const close = c.close;
+    const high = Math.max(c.high, open, close);
+    const low = Math.min(c.low, open, close);
+    out.push({ ...c, open, high, low, close });
+  }
+  return out;
+}
+
+interface Props {
+  candles: Candle[];
+  livePrice?: number | null;
+}
+
+export default function CandlestickChart({ candles, livePrice }: Props) {
+  const visible = useMemo(() => {
+    const norm = normaliseCandles(candles);
+    return norm.slice(-MAX_VISIBLE);
+  }, [candles]);
+
+  const range = useMemo(() => {
+    if (visible.length === 0) return { min: 0, max: 1 };
+    let lowest = Infinity;
+    let highest = -Infinity;
+    for (const c of visible) {
+      if (c.low < lowest) lowest = c.low;
+      if (c.high > highest) highest = c.high;
+    }
+    // Include livePrice in range so the line is always visible
+    if (typeof livePrice === 'number' && Number.isFinite(livePrice)) {
+      if (livePrice < lowest) lowest = livePrice;
+      if (livePrice > highest) highest = livePrice;
+    }
+    if (lowest === highest) { lowest -= 1; highest += 1; }
+    const pad = (highest - lowest) * 0.06;
+    return { min: lowest - pad, max: highest + pad };
+  }, [visible, livePrice]);
+
+  const count = visible.length || 1;
+  const plotWidth = 600 - LEFT_PADDING - RIGHT_PADDING;
+  const spacing = plotWidth / count;
+  const candleWidth = Math.min(Math.max(spacing * CANDLE_BODY_RATIO, 2), CANDLE_WIDTH_MAX);
+
+  const getY = (value: number) => {
+    const plotH = CHART_HEIGHT - TOP_PADDING - BOTTOM_PADDING;
+    return TOP_PADDING + ((range.max - value) / (range.max - range.min)) * plotH;
+  };
+
+  const formatValue = (v: number) => formatPrice(v);
+
+  const gridValues = useMemo(() => {
+    const vals: number[] = [];
+    const step = (range.max - range.min) / 5;
+    for (let i = 0; i <= 5; i++) {
+      vals.push(range.min + step * i);
+    }
+    return vals;
+  }, [range]);
+
+  const priceLineY = livePrice != null ? getY(livePrice) : null;
 
   return (
-    <View onLayout={onLayout} style={{ flex: 1, width: '100%', minHeight: 280, alignSelf: 'stretch' }}>
-      {[0.2, 0.4, 0.6, 0.8].map((position) => (
-        <View key={position} style={{ position: 'absolute', left: CHART_PADDING.left, right: CHART_PADDING.right, top: CHART_PADDING.top + plotHeight * position, height: 1, backgroundColor: COLORS.subtleBorder }} />
-      ))}
-      {visibleCandles.map((candle, index) => {
-        const openY = priceToY(candle.open);
-        const closeY = priceToY(candle.close);
-        const highY = priceToY(candle.high);
-        const lowY = priceToY(candle.low);
-        const bullish = candle.close >= candle.open;
-        const color = bullish ? COLORS.green : COLORS.red;
-        const left = CHART_PADDING.left + index * candleSpace + (candleSpace - bodyWidth) / 2;
-        return <React.Fragment key={`${candle.timestamp}-${index}`}>
-          <View style={{ position: 'absolute', left: left + bodyWidth / 2 - 1, top: highY, width: 2, height: Math.max(1, lowY - highY), backgroundColor: color }} />
-          <View style={{ position: 'absolute', left, top: Math.min(openY, closeY), width: bodyWidth, height: Math.max(2, Math.abs(closeY - openY)), borderRadius: 1, backgroundColor: color }} />
-        </React.Fragment>;
-      })}
-      {lastCandle ? <>
-        <Animated.View style={{ position: 'absolute', left: CHART_PADDING.left, right: CHART_PADDING.right, top: priceLineY, height: 1, borderStyle: 'dashed', borderWidth: 1, borderColor: 'rgba(117,87,247,0.65)' }} />
-        <Animated.View style={{ position: 'absolute', right: 3, transform: [{ translateY: Animated.subtract(priceLineY, 11) }], borderRadius: 6, backgroundColor: COLORS.purple, paddingHorizontal: 5, paddingVertical: 3 }}><Text style={{ color: COLORS.textPrimary, fontSize: 9, fontWeight: '700' }}>{formatPrice(lastCandle.close)}</Text></Animated.View>
-      </> : null}
-      {[0, 0.5, 1].map((position) => {
-        const price = range.max - (range.max - range.min) * position;
-        return <Text key={position} style={{ position: 'absolute', right: 4, top: Math.max(CHART_PADDING.top - 8, priceToY(price) - 8), fontSize: 10, color: COLORS.textMuted }}>{formatPrice(price)}</Text>;
-      })}
-      <View style={{ position: 'absolute', top: 10, left: 14, flexDirection: 'row', alignItems: 'center' }}>
-        <View style={{ width: 7, height: 7, borderRadius: 4, backgroundColor: isLive ? COLORS.green : COLORS.textMuted, marginRight: 6 }} />
-        <Text style={{ fontSize: 11, color: isLive ? COLORS.green : COLORS.textMuted, fontWeight: isLive ? '700' : '400' }}>{isLive ? '● Live' : 'OHLC'}</Text>
+    <View style={{ width: '100%', backgroundColor: CHART_BG }}>
+      <View style={{ width: '100%', backgroundColor: CHART_BG, overflow: 'hidden' }}>
+        <Svg
+          width="100%"
+          height={CHART_HEIGHT}
+          viewBox={`0 0 600 ${CHART_HEIGHT}`}
+          preserveAspectRatio="none"
+        >
+          <Rect x={0} y={0} width={600} height={CHART_HEIGHT} fill={CHART_BG} />
+
+          {/* Grid */}
+          {gridValues.map((value) => {
+            const y = getY(value);
+            return (
+              <G key={value}>
+                <Line x1={LEFT_PADDING} y1={y} x2={600 - RIGHT_PADDING} y2={y} stroke={GRID_COLOR} strokeWidth={0.5} />
+                <SvgText x={600 - RIGHT_PADDING + 8} y={y + 4} fill={TEXT_COLOR} fontSize={9} fontWeight="500" textAnchor="start">
+                  {formatValue(value)}
+                </SvgText>
+              </G>
+            );
+          })}
+
+          {/* Candles */}
+          {visible.map((candle, index) => {
+            const centerX = LEFT_PADDING + index * spacing + spacing / 2;
+            const openY = getY(candle.open);
+            const closeY = getY(candle.close);
+            const highY = getY(candle.high);
+            const lowY = getY(candle.low);
+            const bullish = candle.close >= candle.open;
+            const color = bullish ? BULLISH_COLOR : BEARISH_COLOR;
+            const bodyTop = Math.min(openY, closeY);
+            const bodyHeight = Math.max(Math.abs(closeY - openY), 2);
+
+            return (
+              <G key={`${candle.timestamp}-${index}`}>
+                <Line x1={centerX} y1={highY} x2={centerX} y2={lowY} stroke={WICK_COLOR} strokeWidth={1} />
+                <Rect x={centerX - candleWidth / 2} y={bodyTop} width={candleWidth} height={bodyHeight} rx={1} fill={color} />
+              </G>
+            );
+          })}
+
+          {/* Live price dashed line + pill */}
+          {priceLineY != null && livePrice != null && (
+            <G>
+              {/* Dashed horizontal line across chart */}
+              <Line
+                x1={LEFT_PADDING}
+                y1={priceLineY}
+                x2={600 - RIGHT_PADDING}
+                y2={priceLineY}
+                stroke="#FACC15"
+                strokeWidth={1.2}
+                strokeDasharray="6 3"
+              />
+              {/* Price pill on right edge */}
+              <Rect
+                x={600 - RIGHT_PADDING - 2}
+                y={priceLineY - 10}
+                width={46}
+                height={20}
+                rx={4}
+                fill="#FACC15"
+              />
+              <SvgText
+                x={600 - RIGHT_PADDING + 21}
+                y={priceLineY + 4}
+                fill="#000000"
+                fontSize={9}
+                fontWeight="700"
+                textAnchor="middle"
+              >
+                {formatPrice(livePrice)}
+              </SvgText>
+            </G>
+          )}
+        </Svg>
       </View>
     </View>
   );

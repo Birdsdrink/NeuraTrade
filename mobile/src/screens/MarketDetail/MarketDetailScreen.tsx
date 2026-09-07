@@ -30,13 +30,8 @@ export default function MarketDetailScreen({ navigation, market, onOpenAnalysis 
   const symbol = market?.backendSymbol ?? market?.symbol ?? '';
   const displayName = market?.displayName ?? market?.symbol ?? 'Market';
 
-  // Historical candles from REST API (refetches every 30s as backup)
-  const { data: historicalCandles = [], isLoading, isError, refetch } = useMarketDetail(symbol, TIMEFRAMES[timeframe] ?? 3600, settings.defaultCandleCount, settings.refreshInterval);
-
-  // Live candles: historical base + real-time tick updates via WebSocket
+  const { data: historicalCandles = [] } = useMarketDetail(symbol, TIMEFRAMES[timeframe] ?? 3600, settings.defaultCandleCount, settings.refreshInterval);
   const { candles } = useLiveCandles(symbol, TIMEFRAMES[timeframe] ?? 3600, historicalCandles);
-
-  // Raw live tick for the current price line
   const { livePrice, isLive } = useLiveTick(symbol);
 
   const latestCandle = candles[candles.length - 1];
@@ -70,6 +65,7 @@ export default function MarketDetailScreen({ navigation, market, onOpenAnalysis 
         </View>
         <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 8 }}>
           {isLive && <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: COLORS.green, marginRight: 5 }} />}
+          {!isLive && <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: COLORS.textMuted, marginRight: 5 }} />}
           <Text style={{ fontSize: 18, fontWeight: '700', color: COLORS.textPrimary }}>
             {currentPrice != null ? currentPrice.toFixed(5) : 'Loading…'}
           </Text>
@@ -99,23 +95,8 @@ export default function MarketDetailScreen({ navigation, market, onOpenAnalysis 
         ))}
       </ScrollView>
 
-      {/* Candlestick chart — real-time */}
-      <View style={{ backgroundColor: COLORS.cardBg, marginHorizontal: 16, marginBottom: 16, borderRadius: 20, height: 340, borderWidth: 1, borderColor: COLORS.subtleBorder, overflow: 'hidden' }}>
-        <View style={{ flex: 1, width: '100%', alignSelf: 'stretch' }}>
-          {candles.length > 0 ? (
-            <CandlestickChart candles={candles} livePrice={livePrice} isLive={isLive} />
-          ) : isError ? (
-            <TouchableOpacity onPress={() => refetch()} style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
-              <MaterialCommunityIcons name="cloud-off-outline" size={32} color={COLORS.textMuted} />
-              <Text style={{ color: COLORS.textSecondary, fontSize: 13, marginTop: 8 }}>Could not load data. Tap to retry.</Text>
-            </TouchableOpacity>
-          ) : (
-            <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
-              <Text style={{ color: COLORS.textSecondary, fontSize: 13 }}>{isLoading ? 'Loading market data…' : 'No candle data available.'}</Text>
-            </View>
-          )}
-        </View>
-      </View>
+      {/* Live Candlestick chart */}
+      <CandlestickChart candles={candles} livePrice={livePrice} />
 
       {/* AI Action Buttons */}
       <View style={{ paddingHorizontal: 16 }}>

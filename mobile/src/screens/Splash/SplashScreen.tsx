@@ -1,6 +1,5 @@
 import React, { useEffect, useRef } from 'react';
-import { View, Text, Animated, Easing } from 'react-native';
-import { MaterialCommunityIcons } from '@expo/vector-icons';
+import { View, Text, Image, Animated, Easing } from 'react-native';
 import COLORS from '../../theme/colors';
 
 export default function SplashScreen({ onFinish }: { onFinish: () => void }) {
@@ -43,15 +42,11 @@ export default function SplashScreen({ onFinish }: { onFinish: () => void }) {
 
       {/* Logo */}
       <Animated.View style={{ opacity: fade, transform: [{ scale }], alignItems: 'center' }}>
-        <View style={{
-          width: 88, height: 88, borderRadius: 24,
-          backgroundColor: COLORS.purple + '20',
-          justifyContent: 'center', alignItems: 'center',
-          borderWidth: 2, borderColor: COLORS.purple + '40',
-          marginBottom: 24,
-        }}>
-          <MaterialCommunityIcons name="chart-line-variant" size={44} color={COLORS.purple} />
-        </View>
+        <Image
+          source={require('../../../assets/icon.png')}
+          style={{ width: 160, height: 160, marginBottom: 20 }}
+          resizeMode="contain"
+        />
 
         <Text style={{ fontSize: 32, fontWeight: '800', color: COLORS.textPrimary, letterSpacing: -0.5 }}>
           NeuraTrade

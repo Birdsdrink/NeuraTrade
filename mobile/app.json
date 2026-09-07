@@ -18,6 +18,12 @@
     "android": {
       "package": "com.neuratrade.app"
     },
-    "plugins": []
+    "plugins": [],
+    "extra": {
+      "eas": {
+        "projectId": "23682ca1-10df-41ca-a8ec-c5dc138726f2"
+      }
+    },
+    "owner": "datalink92"
   }
 }

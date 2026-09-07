@@ -14,7 +14,7 @@ export default function SettingsScreen({ navigation }: {
 
   return (
     <ScrollView contentContainerStyle={{ padding: 20, paddingBottom: 140 }} showsVerticalScrollIndicator={false}>
-      <AppHeader />
+      <AppHeader title="Settings" subtitle="Settings" />
 
       {/* ── Trading Defaults ──────────────────────────────────────── */}
       <SectionHeader icon="chart-line" title="TRADING DEFAULTS" />

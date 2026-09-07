@@ -5,6 +5,8 @@ that the rest of the codebase can call instead of the custom `DerivWebSocketClie
 To enable: install `python-deriv-api` and the provider will automatically prefer this adapter.
 """
 
+import asyncio
+
 try:
     from deriv_api.ws.client import DerivWebsocket
     HAS_DERIV_API = True
@@ -30,13 +32,21 @@ class DerivApiAdapter:
         # deriv_api client accepts app_id/url config via env or args; keep simple for now
         self._client = DerivWebsocket()
         self._listeners = []
+        self._connected = False
 
     async def connect(self):
         # deriv_api manages its own loop; call open
         await self._client.connect()
+        self._connected = True
 
     async def disconnect(self):
         await self._client.disconnect()
+        self._connected = False
+
+    @property
+    def is_connected(self) -> bool:
+        """Match the custom WebSocket client's candle-stream contract."""
+        return self._connected
 
     async def send(self, payload):
         await self._client.send(payload)
@@ -45,7 +55,9 @@ class DerivApiAdapter:
         # deriv_api uses on_message style; we wrap
         def _on_message(msg):
             try:
-                cb(msg)
+                result = cb(msg)
+                if asyncio.iscoroutine(result):
+                    asyncio.create_task(result)
             except Exception:
                 pass
 

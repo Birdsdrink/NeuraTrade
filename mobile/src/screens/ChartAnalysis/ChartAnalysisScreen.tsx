@@ -10,8 +10,35 @@ import { useMarkets } from '../../features/markets/hooks/useMarkets';
 import { Market } from '../../domain/entities/Market';
 import { aiClient } from '../../services/api/apiClient';
 import { useSettings } from '../../hooks/useSettings';
+import InputSection from '../../features/chart-ai/components/InputSection';
+import AiDashboard from '../../features/chart-ai/components/AiDashboard';
+import { AiAnalysis } from '../../features/chart-ai/mockAiAnalysis';
 
-type Mode = 'image' | 'instrument';
+type Mode = 'upload' | 'instrument';
+
+/** Exact compact dashboard contract returned by /chart-analysis/dashboard. */
+interface DashboardPayload {
+  score?: number;
+  status?: string;
+  riskLevel?: string;
+  confLevel?: string;
+  insights?: { trend?: string; momentum?: string; liqBias?: string; sentiment?: string };
+  gamePlan?: string;
+  riskManagement?: { rrRatio?: string; stopLoss?: string; positionSize?: string };
+  tradePlan?: {
+    action?: string;
+    whenToBuy?: string;
+    whenToSell?: string;
+    whenToExit?: string;
+    stopLoss?: string;
+    rrRatio?: string;
+    positionSize?: string;
+  };
+  multiTimeframe?: { weekly?: string; daily?: string; h4?: string; h1?: string };
+  smc?: { fvg?: string; bullishOb?: string; bearishOb?: string; buySideLiq?: string; sellSideLiq?: string };
+  breakdown?: { title: string; content: string }[];
+  error?: string;
+}
 
 type AnalysisResult = {
   symbol?: string;
@@ -65,15 +92,14 @@ export default function ChartAnalysisScreen({
   navigation: (screen: 'Markets' | 'MarketDetail' | 'AIAnalysis' | 'Watchlist' | 'FundamentalAnalysis' | 'Settings') => void;
   preselectedMarket?: Market | null;
 }) {
-  const [mode, setMode] = useState<Mode>(preselectedMarket ? 'instrument' : 'image');
-  const [imageUri, setImageUri] = useState<string | null>(null);
-  const [imageBase64, setImageBase64] = useState<string | null>(null);
+  const [mode, setMode] = useState<Mode>(preselectedMarket ? 'instrument' : 'upload');
+  const [aiImage, setAiImage] = useState<{ uri: string; base64: string | null } | null>(null);
   const [selectedMarket, setSelectedMarket] = useState<Market | null>(preselectedMarket ?? null);
   const { settings } = useSettings();
   const [selectedTimeframe, setSelectedTimeframe] = useState(settings.defaultTimeframe);
   const [searchQuery, setSearchQuery] = useState('');
-  const [result, setResult] = useState<AnalysisResult | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [dashboard, setDashboard] = useState<DashboardPayload | null>(null);
+  const [dashLoading, setDashLoading] = useState(false);
   const { data: markets = [] } = useMarkets();
 
   const filteredMarkets = searchQuery.trim()
@@ -87,137 +113,130 @@ export default function ChartAnalysisScreen({
       })
     : markets;
 
-  const dir = (result?.market_direction ?? result?.direction ?? '').toLowerCase();
-  const directionColor =
-    dir === 'bullish'
-      ? COLORS.green
-      : dir === 'bearish'
-      ? COLORS.red
-      : COLORS.yellow;
-  const setupDir = (result?.setup?.direction ?? '').toUpperCase();
-  const setupColor = setupDir === 'BUY' ? COLORS.green : setupDir === 'SELL' ? COLORS.red : COLORS.yellow;
+  /** Map the compact dashboard response into the display component's shape. */
+  const toAiAnalysis = (d: DashboardPayload): AiAnalysis => ({
+    score: d.score ?? 0,
+    status: d.status ?? 'ANALYSIS INCOMPLETE',
+    riskLevel: d.riskLevel ?? 'Medium',
+    confidenceLevel: d.confLevel ?? 'Low',
+    insights: {
+      trend: d.insights?.trend ?? 'Neutral',
+      momentum: d.insights?.momentum ?? 'Flat',
+      liq_bias: d.insights?.liqBias ?? 'Neutral',
+      sentiment: d.insights?.sentiment ?? 'Cautious',
+    },
+    gamePlan: d.gamePlan ?? '',
+    riskManagement: {
+      rrRatio: d.riskManagement?.rrRatio ?? '-',
+      stopLoss: d.riskManagement?.stopLoss ?? '-',
+      positionSize: d.riskManagement?.positionSize ?? '-',
+    },
+    tradePlan: {
+      action: d.tradePlan?.action ?? 'WAIT',
+      whenToBuy: d.tradePlan?.whenToBuy ?? '-',
+      whenToSell: d.tradePlan?.whenToSell ?? '-',
+      whenToExit: d.tradePlan?.whenToExit ?? '-',
+      stopLoss: d.tradePlan?.stopLoss ?? '-',
+      rrRatio: d.tradePlan?.rrRatio ?? '-',
+      positionSize: d.tradePlan?.positionSize ?? '-',
+    },
+    multiTimeframe: {
+      weekly: d.multiTimeframe?.weekly ?? 'Neutral',
+      daily: d.multiTimeframe?.daily ?? 'Neutral',
+      h4: d.multiTimeframe?.h4 ?? 'Consolidating',
+      h1: d.multiTimeframe?.h1 ?? 'Range',
+    },
+    smc: {
+      fvg: d.smc?.fvg ?? '-',
+      bullishOb: d.smc?.bullishOb ?? '-',
+      bearishOb: d.smc?.bearishOb ?? '-',
+      buySideLiq: d.smc?.buySideLiq ?? '-',
+      sellSideLiq: d.smc?.sellSideLiq ?? '-',
+    },
+    breakdown:
+      d.breakdown?.map((b) => ({ title: b.title, content: b.content })) ?? [],
+  });
 
-  const pickImage = async () => {
+  const runDashboard = async () => {
+    setDashLoading(true);
+    setDashboard(null);
     try {
-      const ImagePicker = await import('expo-image-picker');
-      const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
-      if (!perm.granted) {
-        Alert.alert('Permission needed', 'Please grant photo library access to upload chart images.');
-        return;
-      }
-      const pickerResult = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ImagePicker.MediaTypeOptions.Images,
-        quality: 0.85,
-        base64: true,
-      });
-      if (!pickerResult.canceled && pickerResult.assets[0]) {
-        const asset = pickerResult.assets[0];
-        setImageUri(asset.uri);
-        setImageBase64(asset.base64 ?? null);
-      }
-    } catch {
-      Alert.alert(
-        'expo-image-picker not installed',
-        'Run: npx expo install expo-image-picker\nThen restart the app.',
-      );
-    }
-  };
-
-  const takePhoto = async () => {
-    try {
-      const ImagePicker = await import('expo-image-picker');
-      const perm = await ImagePicker.requestCameraPermissionsAsync();
-      if (!perm.granted) {
-        Alert.alert('Permission needed', 'Please grant camera access to photograph charts.');
-        return;
-      }
-      const cameraResult = await ImagePicker.launchCameraAsync({
-        quality: 0.85,
-        base64: true,
-      });
-      if (!cameraResult.canceled && cameraResult.assets[0]) {
-        const asset = cameraResult.assets[0];
-        setImageUri(asset.uri);
-        setImageBase64(asset.base64 ?? null);
-      }
-    } catch {
-      Alert.alert(
-        'expo-image-picker not installed',
-        'Run: npx expo install expo-image-picker\nThen restart the app.',
-      );
-    }
-  };
-
-  const runAnalysis = async () => {
-    setLoading(true);
-    setResult(null);
-    try {
-      if (mode === 'image' && imageBase64) {
-        const { data } = await aiClient.post('/chart-analysis', {
-          image_base64: imageBase64,
+      if (mode === 'upload' && aiImage?.base64) {
+        const { data } = await aiClient.post('/chart-analysis/dashboard', {
+          image_base64: aiImage.base64,
           mime_type: 'image/png',
         });
-        setResult(data);
+        setDashboard(data);
       } else if (mode === 'instrument' && selectedMarket) {
-        const { data } = await aiClient.post('/chart-analysis', {
+        const { data } = await aiClient.post('/chart-analysis/dashboard', {
           symbol: selectedMarket.symbol,
           timeframe_seconds: TIMEFRAMES[selectedTimeframe] ?? 3600,
           candle_count: settings.defaultCandleCount,
         });
-        setResult(data);
+        setDashboard(data);
       } else {
-        setResult({ error: 'Select an image or instrument first.' });
+        setDashboard({ error: 'Select an image or instrument first.' });
       }
     } catch (e: any) {
-      setResult({ error: e?.message ?? 'Analysis request failed.' });
+      setDashboard({ error: e?.message ?? 'Analysis request failed.' });
     } finally {
-      setLoading(false);
+      setDashLoading(false);
     }
   };
 
   return (
+    <View style={{ flex: 1, backgroundColor: COLORS.bgPrimary }}>
     <ScrollView contentContainerStyle={{ padding: 20, paddingBottom: 140 }} showsVerticalScrollIndicator={false}>
       <AppHeader title="Technical Analysis" subtitle="AI-powered chart & indicator analysis" />
 
       {/* Mode Tabs */}
       <View style={{ flexDirection: 'row', marginBottom: 16, backgroundColor: COLORS.cardBg, borderRadius: 14, padding: 3, borderWidth: 1, borderColor: COLORS.subtleBorder }}>
-        {(['image', 'instrument'] as Mode[]).map((m) => (
+        {(['upload', 'instrument'] as Mode[]).map((m) => (
           <TouchableOpacity
             key={m}
-            onPress={() => { setMode(m); setResult(null); }}
+            onPress={() => { setMode(m); setDashboard(null); }}
             style={{ flex: 1, paddingVertical: 10, borderRadius: 11, backgroundColor: mode === m ? COLORS.purple : 'transparent', alignItems: 'center' }}
           >
             <Text style={{ fontSize: 13, fontWeight: '600', color: mode === m ? COLORS.textPrimary : COLORS.textSecondary }}>
-              {m === 'image' ? '📷 Upload Chart' : '📊 Pick Instrument'}
+              {m === 'upload' ? '📷 Upload' : '📊 Instrument'}
             </Text>
           </TouchableOpacity>
         ))}
       </View>
 
-      {/* ── Image Mode ─────────────────────────────────────────────── */}
-      {mode === 'image' && (
-        <View style={{ marginBottom: 20 }}>
-          <Text style={{ color: COLORS.textMuted, fontSize: 12, fontWeight: '600', marginBottom: 8 }}>CHART IMAGE</Text>
-          {imageUri ? (
-            <View style={{ marginBottom: 12 }}>
-              <Image source={{ uri: imageUri }} style={{ width: '100%', height: 200, borderRadius: 14, borderWidth: 1, borderColor: COLORS.subtleBorder }} resizeMode="contain" />
-              <TouchableOpacity onPress={() => { setImageUri(null); setImageBase64(null); setResult(null); }} style={{ position: 'absolute', top: 8, right: 8, width: 28, height: 28, borderRadius: 14, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'center', alignItems: 'center' }}>
-                <Ionicons name="close" size={16} color="#fff" />
-              </TouchableOpacity>
-            </View>
-          ) : (
-            <View style={{ flexDirection: 'row', gap: 10, marginBottom: 12 }}>
-              <TouchableOpacity onPress={pickImage} style={{ flex: 1, backgroundColor: COLORS.cardBg, borderRadius: 14, padding: 20, borderWidth: 1, borderColor: COLORS.subtleBorder, alignItems: 'center' }}>
-                <MaterialCommunityIcons name="image-plus" size={32} color={COLORS.purple} />
-                <Text style={{ color: COLORS.textSecondary, fontSize: 13, marginTop: 8 }}>Gallery</Text>
-              </TouchableOpacity>
-              <TouchableOpacity onPress={takePhoto} style={{ flex: 1, backgroundColor: COLORS.cardBg, borderRadius: 14, padding: 20, borderWidth: 1, borderColor: COLORS.subtleBorder, alignItems: 'center' }}>
-                <MaterialCommunityIcons name="camera" size={32} color={COLORS.purple} />
-                <Text style={{ color: COLORS.textSecondary, fontSize: 13, marginTop: 8 }}>Camera</Text>
-              </TouchableOpacity>
+      {/* ── Upload Mode (AI dashboard) ─────────────────────────────── */}
+      {mode === 'upload' && !aiImage && (
+        <InputSection onImageSelected={(uri, base64) => { setAiImage({ uri, base64 }); setDashboard(null); }} />
+      )}
+
+      {mode === 'upload' && aiImage && (
+        <>
+          <View style={{ marginBottom: 16 }}>
+            <Image source={{ uri: aiImage.uri }} style={{ width: '100%', height: 170, borderRadius: 14, borderWidth: 1, borderColor: COLORS.subtleBorder }} resizeMode="contain" />
+            <TouchableOpacity onPress={() => { setAiImage(null); setDashboard(null); }} style={{ position: 'absolute', top: 8, right: 8, width: 28, height: 28, borderRadius: 14, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'center', alignItems: 'center' }}>
+              <Ionicons name="close" size={16} color="#fff" />
+            </TouchableOpacity>
+          </View>
+          <TouchableOpacity
+            onPress={runDashboard}
+            disabled={dashLoading}
+            style={{ backgroundColor: COLORS.purple, borderRadius: 14, paddingVertical: 13, alignItems: 'center', marginBottom: 16, opacity: dashLoading ? 0.5 : 1 }}
+          >
+            {dashLoading ? (
+              <ActivityIndicator color="#fff" />
+            ) : (
+              <Text style={{ color: '#fff', fontSize: 14.5, fontWeight: '700' }}>✨ Run AI Chart Analysis</Text>
+            )}
+          </TouchableOpacity>
+          {dashboard?.error && (
+            <View style={{ backgroundColor: COLORS.cardBg, borderRadius: 16, padding: 16, borderWidth: 1, borderColor: COLORS.subtleBorder, marginBottom: 16 }}>
+              <Text style={{ color: COLORS.red, fontSize: 14 }}>{dashboard.error}</Text>
             </View>
           )}
-        </View>
+          {dashboard && !dashboard.error && (
+            <AiDashboard data={toAiAnalysis(dashboard)} />
+          )}
+        </>
       )}
 
       {/* ── Instrument Mode ────────────────────────────────────────── */}
@@ -276,141 +295,64 @@ export default function ChartAnalysisScreen({
         </View>
       )}
 
-      {/* ── Analyse Button ─────────────────────────────────────────── */}
-      <TouchableOpacity
-        onPress={runAnalysis}
-        disabled={loading || (mode === 'image' && !imageBase64) || (mode === 'instrument' && !selectedMarket)}
-        style={{ backgroundColor: COLORS.purple, borderRadius: 14, paddingVertical: 14, alignItems: 'center', marginBottom: 20, opacity: loading || (mode === 'image' && !imageBase64) || (mode === 'instrument' && !selectedMarket) ? 0.5 : 1 }}
-      >
-        {loading ? (
-          <ActivityIndicator color="#fff" />
-        ) : (
-          <Text style={{ color: '#fff', fontSize: 15, fontWeight: '700' }}>Run AI Analysis</Text>
-        )}
-      </TouchableOpacity>
-
-      {/* ── Results ─────────────────────────────────────────────────── */}
-      {result?.error && (
-        <View style={{ backgroundColor: COLORS.cardBg, borderRadius: 16, padding: 16, borderWidth: 1, borderColor: COLORS.subtleBorder, marginBottom: 16 }}>
-          <Text style={{ color: COLORS.red, fontSize: 14 }}>{result.error}</Text>
-        </View>
-      )}
-
-      {result && !result.error && (
+      {/* ── Instrument: run + dashboard ────────────────────────────── */}
+      {mode === 'instrument' && (
         <>
-          {/* ── Direction & Confidence ── */}
-          <Card>
-            <Row><MaterialCommunityIcons name="brain" size={20} color={COLORS.purple} /><Label style={{ marginLeft: 6 }}>AI TECHNICAL ANALYSIS</Label></Row>
-            {result.symbol ? <Text style={{ color: COLORS.textMuted, fontSize: 12, marginTop: 4 }}>{result.symbol} · {result.timeframe ?? ''} {result.current_price != null ? `· ${result.current_price}` : ''}</Text> : null}
-            <Text style={{ fontSize: 22, fontWeight: 'bold', color: directionColor, marginVertical: 8 }}>{(result.market_direction ?? result.direction ?? 'Unknown')}</Text>
-            <Text style={{ color: COLORS.textSecondary, fontSize: 13, lineHeight: 18 }}>{result.analysis ?? result.summary ?? ''}</Text>
-            <Divider />
-            <Row style={{ justifyContent: 'space-between' }}>
-              <Text style={{ color: COLORS.textMuted, fontSize: 12 }}>Confidence</Text>
-              <Text style={{ fontSize: 16, fontWeight: 'bold', color: directionColor }}>{result.confidence ?? 0}%</Text>
-            </Row>
-            {result.trend_strength != null && result.trend_strength > 0 && (
-              <Row style={{ justifyContent: 'space-between', marginTop: 6 }}>
-                <Text style={{ color: COLORS.textMuted, fontSize: 12 }}>Trend Strength</Text>
-                <Text style={{ fontSize: 14, fontWeight: '600', color: COLORS.textPrimary }}>{result.trend_strength}/100</Text>
-              </Row>
+          <TouchableOpacity
+            onPress={runDashboard}
+            disabled={dashLoading || !selectedMarket}
+            style={{ backgroundColor: COLORS.purple, borderRadius: 14, paddingVertical: 14, alignItems: 'center', marginBottom: 20, opacity: dashLoading || !selectedMarket ? 0.5 : 1 }}
+          >
+            {dashLoading ? (
+              <ActivityIndicator color="#fff" />
+            ) : (
+              <Text style={{ color: '#fff', fontSize: 15, fontWeight: '700' }}>Run AI Analysis</Text>
             )}
-          </Card>
+          </TouchableOpacity>
 
-          {/* ── Setup Card ── */}
-          {result.setup && result.setup.direction && (
-            <Card>
-              <Row><MaterialCommunityIcons name="crosshairs-gps" size={18} color={setupColor} /><Label style={{ color: setupColor, marginLeft: 6 }}>SETUP: {setupDir}</Label></Row>
-              {result.setup.entry_zone && <KV k="Entry Zone" v={result.setup.entry_zone} />}
-              {result.setup.stop_loss && <KV k="Stop Loss" v={result.setup.stop_loss} color={COLORS.red} />}
-              {result.setup.take_profit_1 && <KV k="Take Profit 1" v={result.setup.take_profit_1} color={COLORS.green} />}
-              {result.setup.take_profit_2 && <KV k="Take Profit 2" v={result.setup.take_profit_2} color={COLORS.green} />}
-              {result.setup.risk_reward && <KV k="Risk / Reward" v={result.setup.risk_reward} />}
-            </Card>
+          {dashboard?.error && (
+            <View style={{ backgroundColor: COLORS.cardBg, borderRadius: 16, padding: 16, borderWidth: 1, borderColor: COLORS.subtleBorder, marginBottom: 16 }}>
+              <Text style={{ color: COLORS.red, fontSize: 14 }}>{dashboard.error}</Text>
+            </View>
           )}
 
-          {/* ── Support & Resistance ── */}
-          {(result.support_levels?.length ?? 0) > 0 || (result.resistance_levels?.length ?? 0) > 0 ? (
-            <Card>
-              <Label>SUPPORT & RESISTANCE</Label>
-              <Row style={{ marginTop: 8 }}>
-                <View style={{ flex: 1 }}>
-                  <Text style={{ color: COLORS.green, fontSize: 12, fontWeight: '600', marginBottom: 4 }}>Support</Text>
-                  {(result.support_levels ?? []).map((lv, i) => <Text key={i} style={{ color: COLORS.textPrimary, fontSize: 14 }}>{lv}</Text>)}
-                </View>
-                <View style={{ flex: 1, alignItems: 'flex-end' }}>
-                  <Text style={{ color: COLORS.red, fontSize: 12, fontWeight: '600', marginBottom: 4 }}>Resistance</Text>
-                  {(result.resistance_levels ?? []).map((lv, i) => <Text key={i} style={{ color: COLORS.textPrimary, fontSize: 14 }}>{lv}</Text>)}
-                </View>
-              </Row>
-            </Card>
-          ) : null}
-
-          {/* ── Market Structure ── */}
-          {result.market_structure ? (
-            <Card>
-              <Label>MARKET STRUCTURE</Label>
-              <Row style={{ marginTop: 8, flexWrap: 'wrap', gap: 8 }}>
-                {result.market_structure.higher_highs && <Pill text="Higher Highs" color={COLORS.green} />}
-                {result.market_structure.higher_lows && <Pill text="Higher Lows" color={COLORS.green} />}
-                {result.market_structure.lower_highs && <Pill text="Lower Highs" color={COLORS.red} />}
-                {result.market_structure.lower_lows && <Pill text="Lower Lows" color={COLORS.red} />}
-                {!result.market_structure.higher_highs && !result.market_structure.higher_lows && !result.market_structure.lower_highs && !result.market_structure.lower_lows && (
-                  <Text style={{ color: COLORS.textMuted, fontSize: 12 }}>Not determined</Text>
-                )}
-              </Row>
-            </Card>
-          ) : null}
-
-          {/* ── Indicators ── */}
-          {result.indicators ? (
-            <Card>
-              <Label>INDICATORS</Label>
-              {result.indicators.rsi != null && <KV k="RSI" v={`${result.indicators.rsi}`} />}
-              {result.indicators.macd != null && <KV k="MACD" v={`${result.indicators.macd}`} />}
-              {result.indicators.stochastic != null && <KV k="Stochastic" v={`${result.indicators.stochastic}`} />}
-              {result.indicators.bollinger_bands && <KV k="Bollinger Bands" v={result.indicators.bollinger_bands} />}
-              {result.indicators.volume && <KV k="Volume" v={result.indicators.volume} />}
-              {(result.indicators.moving_averages ?? []).length > 0 && (
-                <View style={{ marginTop: 6 }}>
-                  <Text style={{ color: COLORS.textMuted, fontSize: 11, marginBottom: 2 }}>Moving Averages</Text>
-                  {(result.indicators.moving_averages ?? []).map((ma, i) => <Text key={i} style={{ color: COLORS.textPrimary, fontSize: 13 }}>{ma}</Text>)}
-                </View>
-              )}
-            </Card>
-          ) : null}
-
-          {/* ── Patterns ── */}
-          {((result.chart_patterns?.length ?? 0) > 0 || (result.candlestick_patterns?.length ?? 0) > 0) ? (
-            <Card>
-              <Label>PATTERNS</Label>
-              {(result.chart_patterns ?? []).map((p, i) => <Pill key={'cp'+i} text={p} color={COLORS.cyan} />)}
-              {(result.candlestick_patterns ?? []).map((p, i) => <Pill key={'cs'+i} text={p} color={COLORS.yellow} />)}
-            </Card>
-          ) : null}
-
-          {/* ── Reasons ── */}
-          {(result.reasons?.length ?? 0) > 0 ? (
-            <Card>
-              <Label>SUPPORTING REASONS</Label>
-              {(result.reasons ?? []).map((r, i) => (
-                <Text key={i} style={{ color: COLORS.textSecondary, fontSize: 13, marginTop: 4, lineHeight: 18 }}>• {r}</Text>
-              ))}
-            </Card>
-          ) : null}
-
-          {/* ── Warnings ── */}
-          {(result.warnings?.length ?? 0) > 0 ? (
-            <Card style={{ borderColor: 'rgba(239,68,68,0.3)' }}>
-              <Row><MaterialCommunityIcons name="alert-outline" size={16} color={COLORS.red} /><Label style={{ color: COLORS.red, marginLeft: 6 }}>WARNINGS</Label></Row>
-              {(result.warnings ?? []).map((w, i) => (
-                <Text key={i} style={{ color: COLORS.textSecondary, fontSize: 12, marginTop: 4, lineHeight: 17 }}>⚠ {w}</Text>
-              ))}
-            </Card>
-          ) : null}
+          {dashboard && !dashboard.error && (
+            <AiDashboard data={toAiAnalysis(dashboard)} />
+          )}
         </>
       )}
     </ScrollView>
+
+    {/* ── Fixed bottom Pro button (Upload mode only) ─────────────── */}
+    {mode === 'upload' && (
+      <TouchableOpacity
+        activeOpacity={0.9}
+        style={{
+          position: 'absolute',
+          left: 20,
+          right: 20,
+          bottom: 24,
+          flexDirection: 'row',
+          alignItems: 'center',
+          justifyContent: 'center',
+          gap: 8,
+          backgroundColor: COLORS.purple,
+          borderRadius: 16,
+          paddingVertical: 15,
+          shadowColor: COLORS.purple,
+          shadowOffset: { width: 0, height: 6 },
+          shadowOpacity: 0.45,
+          shadowRadius: 12,
+          elevation: 8,
+        }}
+      >
+        <MaterialCommunityIcons name="lock-open-outline" size={18} color="#fff" />
+        <Text style={{ color: '#fff', fontSize: 14.5, fontWeight: '800', letterSpacing: 0.3 }}>
+          Unlock AI Assistant (Pro)
+        </Text>
+      </TouchableOpacity>
+    )}
+    </View>
   );
 }
 

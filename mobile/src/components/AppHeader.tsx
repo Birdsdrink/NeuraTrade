@@ -39,7 +39,7 @@ export default function AppHeader({ title, subtitle, onClose, showNotification =
           {showBrand && (
             <Image
               source={require('../../assets/icon.png')}
-              style={{ width: 36, height: 36, borderRadius: 10, marginRight: 10 }}
+              style={{ width: 48, height: 48, marginRight: 10 }}
             />
           )}
           <View>

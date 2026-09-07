@@ -14,9 +14,16 @@ export function useLiveTick(symbol: string) {
     let stopped = false;
     let socket: WebSocket | undefined;
     let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+    // On hosts without WebSocket support (e.g. serverless backends) give up after a few
+    // failed opens and rely on REST polling instead — but keep reconnecting forever once
+    // a connection has ever succeeded (transient drops on a real WS backend).
+    let attempts = 0;
+    let hasConnectedOnce = false;
+    const MAX_ATTEMPTS = 3;
     const connect = () => {
+      attempts += 1;
       socket = new WebSocket(getTickUrl(symbol));
-      socket.onopen = () => setIsLive(true);
+      socket.onopen = () => { hasConnectedOnce = true; setIsLive(true); };
       socket.onmessage = (event) => {
         try {
           const tick = JSON.parse(event.data as string);
@@ -25,7 +32,9 @@ export function useLiveTick(symbol: string) {
       };
       socket.onclose = () => {
         setIsLive(false);
-        if (!stopped) reconnectTimer = setTimeout(connect, 3000);
+        if (!stopped && (hasConnectedOnce || attempts < MAX_ATTEMPTS)) {
+          reconnectTimer = setTimeout(connect, 3000);
+        }
       };
       socket.onerror = () => socket?.close();
     };

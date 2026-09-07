@@ -12,10 +12,11 @@ import { Candle } from '../../../domain/entities/Candle';
  *  - Historical candles are preserved unchanged; only the tail is live.
  */
 
-function getTickWsUrl(symbol: string): string {
+function getTickWsUrl(symbol: string, timeframeSeconds: number): string {
   const apiUrl =
     (process.env.EXPO_PUBLIC_API_BASE_URL as string) || 'http://localhost:8000/api';
-  return `${apiUrl.replace(/^http/, 'ws').replace(/\/$/, '')}/ws/ticks/${encodeURIComponent(symbol)}`;
+  const base = `${apiUrl.replace(/^http/, 'ws').replace(/\/$/, '')}/ws/ticks/${encodeURIComponent(symbol)}`;
+  return `${base}?timeframe_seconds=${timeframeSeconds}`;
 }
 
 /**
@@ -36,18 +37,48 @@ export function useLiveCandles(
   const liveRef = useRef<Candle[]>([]);
   const histLenRef = useRef(0);
 
-  // Stabilize historical candles reference — only reset when data actually changes
+  // Stabilize historical candles reference — only replace the live base when
+  // historical data actually changes.  Keep the ref undefined initially so a
+  // warm React Query cache is copied on the component's first render too.
   const histJson = useMemo(() => JSON.stringify(historicalCandles), [historicalCandles]);
-  const histJsonRef = useRef(histJson);
+  const histJsonRef = useRef<string | undefined>(undefined);
 
   useEffect(() => {
     if (histJsonRef.current === histJson) return;
     histJsonRef.current = histJson;
-    const base = historicalCandles.slice(-200);
-    liveRef.current = [...base];
-    histLenRef.current = base.length;
-    setCandles([...base]);
-  }, [histJson]);
+    const base = historicalCandles
+      .filter((candle) => (
+        Number.isFinite(candle.timestamp)
+        && Number.isFinite(candle.open)
+        && Number.isFinite(candle.high)
+        && Number.isFinite(candle.low)
+        && Number.isFinite(candle.close)
+      ))
+      .sort((a, b) => a.timestamp - b.timestamp)
+      .slice(-200);
+    // Do not let a periodic REST refresh replace a currently forming candle
+    // with an older snapshot of the same timeframe bucket.
+    const liveLast = liveRef.current[liveRef.current.length - 1];
+    const historyLast = base[base.length - 1];
+    const liveBucket = liveLast ? candleBucket(liveLast.timestamp, timeframeSeconds) : null;
+    const historyBucket = historyLast ? candleBucket(historyLast.timestamp, timeframeSeconds) : null;
+    // Keep the forming candle across REST refreshes: when the live candle's
+    // bucket matches the last historical bucket, replace that tail candle;
+    // when it is NEWER (REST history ends at the last completed period but
+    // the tick stream is already forming the next one), append it instead of
+    // discarding it and rebuilding on every refresh.
+    let merged;
+    if (liveLast && liveBucket !== null && historyBucket !== null && liveBucket === historyBucket) {
+      merged = [...base.slice(0, -1), liveLast];
+    } else if (liveLast && liveBucket !== null && historyBucket !== null && liveBucket > historyBucket) {
+      merged = [...base, liveLast];
+    } else {
+      merged = base;
+    }
+    liveRef.current = [...merged];
+    histLenRef.current = merged.length;
+    setCandles([...merged]);
+  }, [histJson, timeframeSeconds]);
 
   // WebSocket tick stream
   useEffect(() => {
@@ -56,13 +87,20 @@ export function useLiveCandles(
     let stopped = false;
     let socket: WebSocket | undefined;
     let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+    // On hosts without WebSocket support (e.g. serverless backends) give up after a few
+    // failed opens and rely on the parent's REST refresh — but keep reconnecting forever
+    // once a connection has ever succeeded (transient drops on a real WS backend).
+    let attempts = 0;
+    let hasConnectedOnce = false;
+    const MAX_ATTEMPTS = 3;
 
     const connect = () => {
       if (stopped) return;
-      const url = getTickWsUrl(symbol);
+      attempts += 1;
+      const url = getTickWsUrl(symbol, timeframeSeconds);
       socket = new WebSocket(url);
 
-      socket.onopen = () => { /* connected */ };
+      socket.onopen = () => { hasConnectedOnce = true; /* connected */ };
 
       socket.onmessage = (event) => {
         try {
@@ -93,7 +131,7 @@ export function useLiveCandles(
             updated = [...current, newCandle];
             // Keep max 200 candles
             if (updated.length > 200) updated = updated.slice(-200);
-          } else {
+          } else if (tickBucket === lastBucket) {
             // Update the current (forming) candle
             const updatedLast: Candle = {
               ...last,
@@ -103,6 +141,10 @@ export function useLiveCandles(
               volume: (last.volume ?? 0) + 1,
             };
             updated = [...current.slice(0, -1), updatedLast];
+          } else {
+            // Late ticks belong to a closed candle and must not mutate the
+            // current bar.
+            return;
           }
 
           liveRef.current = updated;
@@ -113,7 +155,9 @@ export function useLiveCandles(
       };
 
       socket.onclose = () => {
-        if (!stopped) reconnectTimer = setTimeout(connect, 2000);
+        if (!stopped && (hasConnectedOnce || attempts < MAX_ATTEMPTS)) {
+          reconnectTimer = setTimeout(connect, 2000);
+        }
       };
 
       socket.onerror = () => socket?.close();
