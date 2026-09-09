@@ -7,6 +7,10 @@ pydantic==2.13.4
 httpx==0.28.1
 websockets==17.1
 
+# ── AI: Gemini via google-genai ────────────────────────────────────────────
+google-genai>=2.0.0
+Pillow>=10.0.0
+
 # ── Config ───────────────────────────────────────────────────────────────────
 python-dotenv==1.2.3
 

@@ -38,6 +38,10 @@ export default function AiDashboard({ data, warnings, meta }: AiDashboardProps) 
       }`
     : null;
 
+  const trendLower = (data.insights?.trend ?? '').toLowerCase();
+  const isBullish = trendLower.includes('bullish');
+  const isBearish = trendLower.includes('bearish');
+
   return (
     <View>
       {/* ── Confidence gauge + status ─────────────────────────────────── */}
@@ -80,7 +84,7 @@ export default function AiDashboard({ data, warnings, meta }: AiDashboardProps) 
         <InsightCard icon="thought-bubble-outline" label="SENTIMENT" value={data.insights.sentiment} />
       </View>
 
-      {/* ── Trade Setup (when to buy / sell / exit + risk) ───────────── */}
+      {/* ── Trade Setup — conditional based on direction ──────────────── */}
       <SectionCard title="Trade Setup" icon="swap-vertical-bold">
         <View style={styles.actionRow}>
           <Text style={styles.actionLabel}>ACTION</Text>
@@ -89,8 +93,21 @@ export default function AiDashboard({ data, warnings, meta }: AiDashboardProps) 
           </Text>
         </View>
         <View style={styles.actionDivider} />
-        <KVRow label="When to Buy" value={data.tradePlan.whenToBuy} valueColor={COLORS.green} />
-        <KVRow label="When to Sell" value={data.tradePlan.whenToSell} valueColor={COLORS.red} />
+
+        {/* Show buy info only when bullish */}
+        {isBullish && (
+          <>
+            <KVRow label="When to Buy" value={data.tradePlan.whenToBuy} valueColor={COLORS.green} />
+          </>
+        )}
+
+        {/* Show sell info only when bearish */}
+        {isBearish && (
+          <>
+            <KVRow label="When to Sell" value={data.tradePlan.whenToSell} valueColor={COLORS.red} />
+          </>
+        )}
+
         <KVRow label="When to Exit" value={data.tradePlan.whenToExit} valueColor={COLORS.yellow} />
         <View style={styles.actionDivider} />
         <KVRow label="Stop Loss" value={data.tradePlan.stopLoss} valueColor={COLORS.red} />
@@ -190,11 +207,6 @@ const styles = StyleSheet.create({
     flexWrap: 'wrap',
     justifyContent: 'space-between',
     marginBottom: 4,
-  },
-  paragraph: {
-    color: COLORS.textSecondary,
-    fontSize: 13.5,
-    lineHeight: 20,
   },
   actionRow: {
     flexDirection: 'row',

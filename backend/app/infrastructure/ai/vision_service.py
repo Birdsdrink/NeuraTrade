@@ -1,22 +1,13 @@
 """AI Vision service for forex chart technical analysis.
 
-Supports three providers with automatic fallback:
-  1. Qwen2.5-VL-7B-Instruct via HuggingFace Inference API (primary)
-  2. Qwen2.5-VL-72B-Instruct via OpenRouter (secondary — very cheap)
-  3. Google Gemini via Google AI Studio (tertiary)
+Uses Google Gemini via the google-genai SDK for all LLM calls:
+  - Image chart analysis (multimodal)
+  - Candle data technical analysis (text)
+  - Dashboard generation
 
 Configure via environment variables:
-  # Primary: Qwen via HuggingFace
-  HF_API_TOKEN  – HuggingFace API token (free at huggingface.co/settings/tokens)
-  QWEN_MODEL    – Model id (default: Qwen/Qwen2.5-VL-7B-Instruct)
-
-  # Secondary: Qwen via OpenRouter
-  OPENROUTER_API_KEY – OpenRouter API key (free at openrouter.ai/keys)
-  OPENROUTER_MODEL   – Model id (default: qwen/qwen2.5-vl-72b-instruct)
-
-  # Tertiary: Google Gemini
-  AI_API_KEY    – Google AI Studio API key
-  AI_MODEL      – Gemini model id (default: gemini-3.6-flash)
+  GEMINI_API_KEY  – Google AI API key
+  GEMINI_MODEL    – Gemini model id (default: gemini-2.5-flash)
 """
 
 import os
@@ -34,46 +25,15 @@ logger = logging.getLogger(__name__)
 
 # ── Provider config ──────────────────────────────────────────────────────────
 
-# HuggingFace / Qwen
-HF_API_TOKEN = (
-    os.getenv("HF_API_TOKEN")
-    or os.getenv("HF_TOKEN")
-    or os.getenv("HUGGING_FACE_HUB_TOKEN")
-    or ""
-)
-QWEN_MODEL = os.getenv("QWEN_MODEL", "Qwen/Qwen2.5-VL-7B-Instruct")
-HF_INFERENCE_URL = f"https://api-inference.huggingface.co/models/{QWEN_MODEL}"
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("AI_API_KEY") or ""
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
 
-# OpenRouter / Qwen
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
-OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "qwen/qwen2.5-vl-72b-instruct")
-OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-
-# Google Gemini
-GEMINI_API_KEY = os.getenv("AI_API_KEY", "")
-GEMINI_MODEL = os.getenv("AI_MODEL", "gemini-3.6-flash")
-GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta"
-
-# Optional HTTP(S) proxy for outbound AI calls (needed on networks where
-# the machine cannot reach the providers directly). Values like
-# "http://192.168.43.1:9000" or "http://user:pass@host:port".
+# Optional HTTP(S) proxy for outbound AI calls
 _AI_PROXY = os.getenv("AI_HTTP_PROXY", "") or os.getenv("HTTPS_PROXY", "") or os.getenv("HTTP_PROXY", "")
 
-HAS_HF = bool(HF_API_TOKEN)
-HAS_OPENROUTER = bool(OPENROUTER_API_KEY)
 HAS_GEMINI = bool(GEMINI_API_KEY)
 
-# Connectivity cache per provider (None=unknown, True=works, False=blocked).
-# Blocked entries expire after a cooldown so a transient failure does not
-# disable a provider for the lifetime of a warm serverless instance.
-_prov_status: dict[str, Optional[bool]] = {"hf": None, "or": None, "gemini": None}
-_prov_blocked_at: dict[str, float] = {}
-_PROV_COOLDOWN_S = 120.0
-
-logger.info(
-    "Vision service init: HAS_HF=%s, HAS_OPENROUTER=%s, HAS_GEMINI=%s",
-    HAS_HF, HAS_OPENROUTER, HAS_GEMINI,
-)
+logger.info("Vision service init: HAS_GEMINI=%s, model=%s, proxy=%s", HAS_GEMINI, GEMINI_MODEL, bool(_AI_PROXY))
 
 # ── Prompts ─────────────────────────────────────────────────────────────────
 
@@ -162,7 +122,7 @@ Rules:
 - support_levels & resistance_levels: REAL candle prices (swing lows/highs or obvious round numbers).
 - candlestick_patterns: only clearly visible patterns; empty if none stand out.
 - indicators: pre-compute RSI, SMA-10/20/50 when possible.
-- analysis: 1-2 sentences with the bias, a key level, and a setup trigger (e.g. "consolidating near 80000, looking for breakout above 80500 or rejection at resistance").
+- analysis: 1-2 sentences with the bias, a key level, and a setup trigger.
 - setup: bullish -> direction=BUY, entry_zone=above nearest resistance/breakout, stop_loss=below nearest support, take_profit_1=first target; bearish mirrored; neutral -> direction=WAIT with nulls.
 - reasons: 2-3 short bullets.
 - warnings: short flags like "no clear trend" or "low conviction" when confidence is low.
@@ -359,6 +319,97 @@ def _compute_basic_indicators(candles: list[dict]) -> dict:
     return {"rsi": rsi, "sma_10": sma_10, "sma_20": sma_20, "sma_50": sma_50}
 
 
+def _detect_direction(candles: list[dict]) -> dict:
+    """Deterministically classify trend direction from candle data."""
+    closes = [c.get("close") for c in candles if c.get("close") is not None]
+    highs = [c.get("high") for c in candles if c.get("high") is not None]
+    lows = [c.get("low") for c in candles if c.get("low") is not None]
+    if len(closes) < 10 or len(highs) < 10 or len(lows) < 10:
+        return {"direction": "neutral", "confidence": 0, "trend_strength": 0.0, "reasons": [], "rsi": None}
+
+    half = max(3, len(closes) // 3)
+    recent_highs = highs[-half:]
+    recent_lows = lows[-half:]
+    prior_highs = highs[-2 * half:-half] or highs[:half]
+    prior_lows = lows[-2 * half:-half] or lows[:half]
+
+    hh = sum(1 for rh, ph in zip(recent_highs, prior_highs) if rh > ph)
+    ll = sum(1 for rl, pl in zip(recent_lows, prior_lows) if rl > pl)
+    lh = sum(1 for rh, ph in zip(recent_highs, prior_highs) if rh < ph)
+    dl = sum(1 for rl, pl in zip(recent_lows, prior_lows) if rl < pl)
+    n = len(recent_highs)
+
+    sma = _compute_basic_indicators(candles)
+    sma10, sma20, sma50 = sma.get("sma_10"), sma.get("sma_20"), sma.get("sma_50")
+    last = closes[-1]
+    price_above_sma = sum(1 for s in (sma10, sma20, sma50) if s is not None and last > s)
+    price_below_sma = sum(1 for s in (sma10, sma20, sma50) if s is not None and last < s)
+    bull_sma = sma10 and sma20 and sma50 and sma10 > sma20 > sma50
+    bear_sma = sma10 and sma20 and sma50 and sma10 < sma20 < sma50
+
+    rsi = sma.get("rsi")
+    recent_chg = (closes[-1] / closes[-6] - 1) * 100 if len(closes) >= 6 else 0
+
+    bull_score = 0
+    bear_score = 0
+    reasons: list[str] = []
+
+    if hh >= max(1, n * 0.6):
+        bull_score += 3
+        reasons.append(f"Higher highs ({hh}/{n} recent swing highs above prior)")
+    if ll >= max(1, n * 0.6):
+        bull_score += 2
+        reasons.append(f"Higher lows ({ll}/{n})")
+    if bull_sma:
+        bull_score += 3
+        reasons.append("Bullish SMA alignment (10>20>50)")
+    if price_above_sma >= 2:
+        bull_score += 2
+        reasons.append("Price trading above short/medium SMAs")
+    if rsi is not None and rsi > 55:
+        bull_score += 1
+        reasons.append(f"RSI-14 at {rsi:.1f} (bullish momentum)")
+    if recent_chg > 0.1:
+        bull_score += 1
+
+    if lh >= max(1, n * 0.6):
+        bear_score += 3
+        reasons.append(f"Lower highs ({lh}/{n})")
+    if dl >= max(1, n * 0.6):
+        bear_score += 2
+        reasons.append(f"Lower lows ({dl}/{n})")
+    if bear_sma:
+        bear_score += 3
+        reasons.append("Bearish SMA alignment (10<20<50)")
+    if price_below_sma >= 2:
+        bear_score += 2
+        reasons.append("Price trading below short/medium SMAs")
+    if rsi is not None and rsi < 45:
+        bear_score += 1
+        reasons.append(f"RSI-14 at {rsi:.1f} (bearish momentum)")
+    if recent_chg < -0.1:
+        bear_score += 1
+
+    spread = abs(bull_score - bear_score)
+    total = bull_score + bear_score
+    if total == 0 or spread < 2:
+        return {"direction": "neutral", "confidence": 0, "trend_strength": 0.0, "reasons": reasons or ["Mixed structure; no clear directional edge."], "rsi": rsi}
+
+    if bull_score > bear_score:
+        direction = "bullish"
+    else:
+        direction = "bearish"
+    strength = min(0.95, 0.35 + spread * 0.1)
+    confidence = int(min(92, 50 + spread * 8))
+    return {
+        "direction": direction,
+        "confidence": confidence,
+        "trend_strength": round(strength, 2),
+        "reasons": reasons,
+        "rsi": rsi,
+    }
+
+
 # ── Public API ───────────────────────────────────────────────────────────────
 
 async def analyse_chart_image(
@@ -398,11 +449,20 @@ async def analyse_candles(
 
     result = await _call_llm(prompt=prompt)
 
+    if not result.get("market_direction") or result.get("market_direction") == "neutral":
+        det = _detect_direction(candles)
+        if det.get("direction") != "neutral":
+            result["market_direction"] = det["direction"]
+            result["confidence"] = result.get("confidence") or det.get("confidence", 0)
+            if not result.get("trend_strength"):
+                result["trend_strength"] = det.get("trend_strength", 0)
+            if not result.get("reasons"):
+                result["reasons"] = det.get("reasons", [])
+
     ind = result.get("indicators", {})
     if ind.get("rsi") is None and computed.get("rsi") is not None:
         ind["rsi"] = computed["rsi"]
 
-    # Normalize moving averages to string format
     mas_raw = ind.get("moving_averages", [])
     mas_strings: list[str] = []
     for m in mas_raw:
@@ -425,7 +485,7 @@ async def analyse_candles(
     return result
 
 
-# ── "AI Pro" dashboard (structured technical readout) ────────────────────────
+# ── "AI Pro" dashboard ──────────────────────────────────────────────────────
 
 _DASHBOARD_EMPTY = {
     "score": 0,
@@ -514,7 +574,7 @@ DASHBOARD_IMAGE_PROMPT = """\
 You are an expert technical analyst AI. Analyze the provided trading chart image and extract market insights into a concise JSON object.
 
 CRITICAL RULES:
-1. Return ONLY valid JSON. No conversational text, no preambles, no markdown codeblocks (` ```json `).
+1. Return ONLY valid JSON. No conversational text, no preambles, no markdown codeblocks.
 2. Keep all string values short, precise, and direct to minimize output token consumption.
 3. Keep the "gamePlan" and breakdown "content" fields to 1-2 concise sentences max.
 4. In "gamePlan", always state WHEN to enter a trade (trigger + entry price) and WHEN to close (target price / invalidation). Use the exact chart levels.
@@ -793,9 +853,21 @@ def _analysis_to_dashboard(analysis: dict, symbol: str, timeframe: str, candles:
     rsi = indicators.get("rsi")
     mas = indicators.get("moving_averages") or []
 
-    # When the LLM produced no explicit levels, derive support/resistance and
-    # the current price deterministically from the candle data so the trade
-    # plan always has concrete levels to reference.
+    if candles:
+        det = _detect_direction(candles)
+        if det.get("direction") != "neutral":
+            direction = det["direction"]
+        confidence = confidence or det.get("confidence", 0)
+        ts_det = det.get("trend_strength")
+        if not analysis.get("trend_strength") and ts_det:
+            analysis["trend_strength"] = ts_det
+        if det.get("rsi") and rsi is None:
+            rsi = det["rsi"]
+            indicators["rsi"] = rsi
+        if not reasons:
+            reasons = det.get("reasons") or []
+            analysis["reasons"] = reasons
+
     if candles and not support:
         recent = candles[-20:]
         lows = [c.get("low") for c in recent if c.get("low") is not None]
@@ -809,11 +881,7 @@ def _analysis_to_dashboard(analysis: dict, symbol: str, timeframe: str, candles:
         if closes:
             price = closes[-1]
 
-    # Score & confidence — when the LLM produced no score (0), derive a
-    # meaningful one from the available indicators so the gauge is never blank.
     if confidence <= 0 and price is not None and support and resistance:
-        # Compute confidence from how close price is to a clear directional
-        # level and the RSI signal strength.
         near_support = abs(price - support[0]) if support else 0
         near_resistance = abs(resistance[0] - price) if resistance else 0
         level_spread = (resistance[0] - support[0]) if (resistance and support and resistance[0] > support[0]) else 1
@@ -824,7 +892,6 @@ def _analysis_to_dashboard(analysis: dict, symbol: str, timeframe: str, candles:
     out["score"] = max(10, min(100, int(confidence))) if confidence > 0 else 35
     out["confidence_level"] = "High" if out["score"] >= 70 else "Medium" if out["score"] >= 40 else "Low"
 
-    # Status headline
     bias_word = direction.upper()
     trend_desc = "RANGING"
     ts = analysis.get("trend_strength", 0)
@@ -834,16 +901,19 @@ def _analysis_to_dashboard(analysis: dict, symbol: str, timeframe: str, candles:
         trend_desc = "MILD"
     out["status"] = f"{bias_word} {trend_desc}"
 
-    # Risk level
     out["risk_level"] = "High" if confidence < 30 else "Medium" if confidence < 60 else "Low"
 
-    # Insights from structure
     ms = analysis.get("market_structure") or {}
-    out["insights"]["trend"] = (
-        "Bullish" if ms.get("higher_highs") and ms.get("higher_lows")
-        else "Bearish" if ms.get("lower_highs") and ms.get("lower_lows")
-        else "Ranging"
-    )
+    if ms.get("higher_highs") and ms.get("higher_lows"):
+        out["insights"]["trend"] = "Bullish"
+    elif ms.get("lower_highs") and ms.get("lower_lows"):
+        out["insights"]["trend"] = "Bearish"
+    else:
+        out["insights"]["trend"] = (
+            "Bullish" if direction in ("bullish", "long")
+            else "Bearish" if direction in ("bearish", "short")
+            else "Ranging"
+        )
     out["insights"]["momentum"] = (
         "Rising" if direction in ("bullish", "long")
         else "Declining" if direction in ("bearish", "short")
@@ -852,10 +922,8 @@ def _analysis_to_dashboard(analysis: dict, symbol: str, timeframe: str, candles:
     out["insights"]["liq_bias"] = "Sell-side" if direction in ("bearish", "short") else "Buy-side" if direction in ("bullish", "long") else "Balanced"
     out["insights"]["sentiment"] = "Optimistic" if confidence >= 60 and direction in ("bullish", "long") else "Cautious" if confidence < 40 else "Neutral"
 
-    # Meta
     out["meta"] = {"symbol": symbol, "timeframe": timeframe, "current_price": price}
 
-    # Game plan from setup + support/resistance
     plan_parts = []
     if setup.get("direction") and setup["direction"] != "WAIT":
         plan_parts.append(f"Suggested direction: {setup['direction']}")
@@ -873,17 +941,15 @@ def _analysis_to_dashboard(analysis: dict, symbol: str, timeframe: str, candles:
         plan_parts.append(f"Resistance levels: {', '.join(str(r) for r in resistance)}")
     out["game_plan"] = ". ".join(plan_parts) if plan_parts else analysis.get("analysis", "No actionable plan available.")
 
-    # Risk management — use setup data when available, else derive from
-    # the support/resistance structure so stop loss and RR are never blank.
     sl = setup.get("stop_loss")
     rr = setup.get("risk_reward")
     if not sl and support:
         sl = f"Below {support[0]}"
     if not rr and support and resistance and price and resistance[0] > support[0]:
-        risk = abs(price - support[0])
+        risk_val = abs(price - support[0])
         reward = abs(resistance[0] - price)
-        if risk > 0:
-            rr_val = round(reward / risk, 1)
+        if risk_val > 0:
+            rr_val = round(reward / risk_val, 1)
             rr = f"1:{rr_val}"
     out["risk_management"] = {
         "rr_ratio": str(rr or "-"),
@@ -891,8 +957,12 @@ def _analysis_to_dashboard(analysis: dict, symbol: str, timeframe: str, candles:
         "position_size": "Conservative" if out["score"] < 40 else "Moderate" if out["score"] < 70 else "Aggressive",
     }
 
-    # Trade plan: when to buy / sell / exit + stop loss, from the setup
-    direction_label = (setup.get("direction") or direction or "wait").upper()
+    _raw_action = (setup.get("direction") or direction or "wait").upper()
+    if _raw_action in ("LONG", "BULLISH"):
+        _raw_action = "BUY"
+    elif _raw_action in ("SHORT", "BEARISH"):
+        _raw_action = "SELL"
+    direction_label = _raw_action if _raw_action in ("BUY", "SELL", "WAIT") else "WAIT"
     entry = setup.get("entry_zone")
     stop = setup.get("stop_loss")
     tp1 = setup.get("take_profit_1")
@@ -902,8 +972,6 @@ def _analysis_to_dashboard(analysis: dict, symbol: str, timeframe: str, candles:
     resistance_str = ", ".join(str(r) for r in resistance[:2]) if resistance else ""
     current_str = f"{price:.5f}" if isinstance(price, (int, float)) else "current price"
 
-    # When no explicit setup exists, still give actionable levels from the
-    # support/resistance structure so the trade plan is never blank.
     if not entry and resistance_str and direction_label in ("BUY", "LONG"):
         entry = f"a break/retest above {resistance_str}"
     if not entry and support_str and direction_label in ("SELL", "SHORT"):
@@ -913,14 +981,13 @@ def _analysis_to_dashboard(analysis: dict, symbol: str, timeframe: str, candles:
     if not stop and resistance_str and direction_label in ("SELL", "SHORT"):
         stop = f"above {resistance_str}"
 
-    # Derive stop loss and RR from support/resistance when setup didn't provide them.
     if not stop and support:
         stop = f"Below {support[0]}"
     if not rr and resistance and support and resistance[0] > support[0]:
-        risk = abs((price or resistance[0]) - support[0])
+        risk_val = abs((price or resistance[0]) - support[0])
         reward = abs(resistance[0] - (price or support[0]))
-        if risk > 0:
-            rr = f"1:{round(reward / risk, 1)}"
+        if risk_val > 0:
+            rr = f"1:{round(reward / risk_val, 1)}"
     out["trade_plan"] = {
         "action": direction_label if direction_label in ("BUY", "SELL", "WAIT") else "WAIT",
         "when_to_buy": (
@@ -943,7 +1010,6 @@ def _analysis_to_dashboard(analysis: dict, symbol: str, timeframe: str, candles:
         "position_size": "Conservative" if out["score"] < 40 else "Moderate" if out["score"] < 70 else "Aggressive",
     }
 
-    # Multi-timeframe (infer from data)
     direction_label = out["insights"]["trend"]
     out["multi_timeframe"] = {
         "weekly": direction_label,
@@ -952,7 +1018,6 @@ def _analysis_to_dashboard(analysis: dict, symbol: str, timeframe: str, candles:
         "h1": "Correction" if ts < 0.2 else direction_label,
     }
 
-    # SMC from support/resistance
     out["smc"] = {
         "fvg": "Not detected" if not patterns else f"{len(patterns)} pattern(s) identified",
         "bullish_ob": f"Support at {support[0]}" if support else "-",
@@ -961,7 +1026,6 @@ def _analysis_to_dashboard(analysis: dict, symbol: str, timeframe: str, candles:
         "sell_side_liq": f"Below {support[0]}" if support else "-",
     }
 
-    # Breakdown — all human-readable text, no raw JSON or config errors.
     rsi_val = rsi
     rsi_str = f"RSI-14 is at {rsi_val:.1f}, indicating {'overbought' if rsi_val > 70 else 'oversold' if rsi_val < 30 else 'neutral momentum'}." if rsi_val else "RSI data is not yet available."
     mas_str = ", ".join(mas[:3]) if mas else None
@@ -971,12 +1035,13 @@ def _analysis_to_dashboard(analysis: dict, symbol: str, timeframe: str, candles:
     trend_label = out["insights"]["trend"]
     mom_label = out["insights"]["momentum"]
 
-    # Human-readable trend analysis sentence
+    bias_word = direction.upper()
     trend_text = (
-        f"The {timeframe} chart for {symbol} shows a {trend_label.lower()} bias. "
+        f"The {timeframe} chart for {symbol} shows a {trend_label.lower()} bias ({bias_word} on {timeframe}). "
         f"Momentum is {mom_label.lower()}. "
         + (f"{rsi_str} " if rsi_str else "")
         + (f"Short-term moving averages ({mas_str}) are {'above' if 'above' in str(mas).lower() else 'near'} the price, confirming the {trend_label.lower()} structure." if mas_str else "")
+        + ("; ".join(reasons) if reasons else "")
     ).strip()
 
     out["breakdown"] = [
@@ -996,13 +1061,7 @@ async def analyse_candles_dashboard(
     timeframe: str,
     candles: list[dict],
 ) -> dict:
-    """Candle data -> structured AI Pro dashboard payload.
-
-    Primary path: the compact dashboard prompt (exact user schema with
-    enter/close guidance). Falls back to transforming the basic candle
-    analysis when the LLM dashboard call fails, so the endpoint always
-    answers with a well-formed payload.
-    """
+    """Candle data -> structured AI Pro dashboard payload."""
     try:
         summary = _candle_summary_text(candles)
         computed = _compute_basic_indicators(candles)
@@ -1015,7 +1074,6 @@ async def analyse_candles_dashboard(
         )
         result = await _call_llm(prompt=prompt, max_tokens=2048)
         normalised = _normalise_dashboard(result, symbol=symbol, timeframe=timeframe)
-        # If the LLM came back empty/failed, fall back to the transform.
         if normalised.get("score", 0) > 0 or (result.get("status") and result["status"] not in ("", "ANALYSIS INCOMPLETE")):
             return normalised
         raise RuntimeError("Empty LLM dashboard result")
@@ -1023,6 +1081,80 @@ async def analyse_candles_dashboard(
         logger.warning("Dashboard LLM failed (%s), falling back to transform", exc)
         basic = await analyse_candles(symbol, timeframe, candles)
         return _analysis_to_dashboard(basic, symbol, timeframe, candles=candles)
+
+
+# ── Gemini via google-genai SDK ──────────────────────────────────────────────
+
+_gemini_client = None
+
+
+def _get_gemini_client():
+    """Lazy-init the google-genai client with proxy support."""
+    global _gemini_client
+    if _gemini_client is not None:
+        return _gemini_client
+
+    try:
+        from google import genai
+        import httpx as _httpx
+
+        # Build httpx client with proxy support
+        http_client = _httpx.AsyncClient(
+            proxy=_AI_PROXY or None,
+            timeout=_httpx.Timeout(120.0, connect=30.0),
+        )
+
+        _gemini_client = genai.Client(
+            api_key=GEMINI_API_KEY,
+            http_options={"httpx_async_client": http_client},
+        )
+        logger.info("Gemini client initialized (model=%s, proxy=%s)", GEMINI_MODEL, bool(_AI_PROXY))
+        return _gemini_client
+    except Exception as e:
+        logger.error("Failed to initialize Gemini client: %s", e)
+        raise
+
+
+async def _call_gemini(
+    prompt: str,
+    image_base64: Optional[str] = None,
+    mime_type: str = "image/png",
+    max_tokens: int = 2048,
+) -> dict:
+    """Call Gemini via google-genai SDK with optional image."""
+    from google.genai import types
+
+    client = _get_gemini_client()
+
+    # Build contents
+    contents = []
+    if image_base64:
+        from PIL import Image
+        import io
+        raw_bytes = base64.b64decode(image_base64)
+        img = Image.open(io.BytesIO(raw_bytes))
+        contents.append(img)
+    contents.append(prompt)
+
+    response = await client.aio.models.generate_content(
+        model=GEMINI_MODEL,
+        contents=contents,
+        config=types.GenerateContentConfig(
+            max_output_tokens=max_tokens,
+            temperature=0.2,
+        ),
+    )
+
+    # Extract text — gemini-3.6-flash uses thought tokens which can make
+    # response.text return None, so fall back to parsing candidates directly.
+    raw = response.text
+    if not raw and response.candidates:
+        parts = response.candidates[0].content.parts if response.candidates[0].content else []
+        raw = "".join(p.text or "" for p in parts).strip()
+    if not raw:
+        raise ValueError("Gemini returned empty text")
+
+    return _parse_llm_json(raw)
 
 
 # ── Unified LLM dispatcher ──────────────────────────────────────────────────
@@ -1033,199 +1165,41 @@ async def _call_llm(
     mime_type: str = "image/png",
     max_tokens: int = 2048,
 ) -> dict:
-    """Try providers in order: Qwen HF → OpenRouter → Gemini.
-    Caches connectivity to avoid repeated slow timeouts."""
-    providers = [
-        ("hf", HAS_HF, lambda: _call_qwen(prompt, image_base64, mime_type, max_tokens)),
-        ("or", HAS_OPENROUTER, lambda: _call_openrouter(prompt, image_base64, mime_type, max_tokens)),
-        ("gemini", HAS_GEMINI, lambda: _call_gemini(prompt, image_base64, mime_type, max_tokens)),
-    ]
-
-    now = time.monotonic()
-    available = [
-        (k, fn)
-        for k, has, fn in providers
-        if has
-        and (
-            _prov_status.get(k) is not False
-            or now - _prov_blocked_at.get(k, 0) > _PROV_COOLDOWN_S
-        )
-    ]
-    if not available:
-        return _no_provider_result()
+    """Call Gemini (single provider). Falls back to deterministic analysis on failure."""
+    if not HAS_GEMINI:
+        return {
+            **_EMPTY_RESULT,
+            "analysis": "No AI provider configured. Set GEMINI_API_KEY environment variable.",
+            "warnings": ["No API keys configured."],
+        }
 
     last_err = None
-    for key, fn in available:
-        # Two attempts per provider: transient network blips are common on
-        # serverless egress, and a single failure should not burn the provider.
-        for attempt in (1, 2):
-            try:
-                result = await fn()
-                _prov_status[key] = True
-                logger.info("Provider %s call succeeded", key)
-                return result
-            except httpx.ConnectError as e:
-                logger.warning("Provider %s blocked by proxy: %s", key, e)
-                _prov_status[key] = False
-                _prov_blocked_at[key] = time.monotonic()
-                last_err = e
-                break  # connection refused twice -> move to next provider
-            except httpx.HTTPStatusError as e:
-                status = e.response.status_code
-                if status in (503, 429):
-                    logger.warning("Provider %s returned %d (transient), trying next", key, status)
-                    if attempt == 2:
-                        _prov_blocked_at[key] = time.monotonic()
-                    continue  # retry once
-                logger.warning("Provider %s returned %d", key, status)
-                _prov_status[key] = False
-                _prov_blocked_at[key] = time.monotonic()
-                last_err = e
+    # 429 RESOURCE_EXHAUSTED means the daily free-tier quota is used up —
+    # retrying for minutes will not help, so fail fast and let the
+    # deterministic candle-structure fallback produce the dashboard.
+    max_attempts = 2 if last_err is None else 2
+    for attempt in range(max_attempts):
+        try:
+            result = await _call_gemini(prompt, image_base64, mime_type, max_tokens)
+            logger.info("Gemini call succeeded (attempt %d)", attempt + 1)
+            return result
+        except Exception as e:
+            last_err = e
+            err_str = str(e)
+            is_quota = "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "quota" in err_str.lower()
+            if is_quota:
+                logger.warning("Gemini quota exhausted, failing fast: %s", err_str[:200])
                 break
-            except Exception as e:
-                logger.warning("Provider %s failed: %s: %s", key, type(e).__name__, e)
-                last_err = e
-                break
+            logger.warning("Gemini attempt %d failed (%s), retrying", attempt + 1, type(e).__name__)
+            if attempt < 1:
+                await asyncio.sleep(2)
 
     return {
         **_EMPTY_RESULT,
-        "analysis": "All AI providers failed. Please try again shortly.",
+        "analysis": f"AI analysis unavailable: {type(last_err).__name__}.",
         "warnings": [
-            f"All AI providers failed. Last error: {type(last_err).__name__}: {last_err}"
-            if last_err
-            else "All providers unavailable."
+            "Gemini free-tier quota exhausted. Analysis falls back to computed indicators."
+            if last_err and ("429" in str(last_err) or "quota" in str(last_err).lower())
+            else f"Gemini failed: {type(last_err).__name__}: {last_err}"
         ],
     }
-
-
-def _no_provider_result() -> dict:
-    missing = []
-    if not HAS_HF:
-        missing.append("HF_API_TOKEN (Qwen via HuggingFace)")
-    if not HAS_OPENROUTER:
-        missing.append("OPENROUTER_API_KEY (Qwen via OpenRouter)")
-    if not HAS_GEMINI:
-        missing.append("AI_API_KEY (Gemini via Google)")
-    return {
-        **_EMPTY_RESULT,
-        "analysis": f"No AI provider configured. Set one of: {', '.join(missing)}",
-        "warnings": ["No API keys configured."],
-    }
-
-
-# ── Qwen via HuggingFace ────────────────────────────────────────────────────
-
-async def _call_qwen(
-    prompt: str,
-    image_base64: Optional[str] = None,
-    mime_type: str = "image/png",
-    max_tokens: int = 2048,
-) -> dict:
-    messages = [{"role": "user", "content": []}]
-    if image_base64:
-        messages[0]["content"].append({
-            "type": "image_url",
-            "image_url": {"url": f"data:{mime_type};base64,{image_base64}"},
-        })
-    messages[0]["content"].append({"type": "text", "text": prompt})
-
-    payload = {"model": QWEN_MODEL, "messages": messages, "max_tokens": max_tokens, "temperature": 0.2}
-    headers = {"Authorization": f"Bearer {HF_API_TOKEN}", "Content-Type": "application/json"}
-
-    # Short timeout — if blocked by proxy we want to fail fast
-    async with httpx.AsyncClient(timeout=15, trust_env=False, proxy=_AI_PROXY or None) as client:
-        resp = await client.post(HF_INFERENCE_URL, json=payload, headers=headers)
-        resp.raise_for_status()
-        body = resp.json()
-
-    raw = body["choices"][0]["message"]["content"].strip()
-    return _parse_llm_json(raw)
-
-
-# ── Qwen via OpenRouter (OpenAI-compatible) ──────────────────────────────────
-
-async def _call_openrouter(
-    prompt: str,
-    image_base64: Optional[str] = None,
-    mime_type: str = "image/png",
-    max_tokens: int = 2048,
-) -> dict:
-    """Call Qwen VL model via OpenRouter's OpenAI-compatible API."""
-    content: list = []
-    if image_base64:
-        content.append({
-            "type": "image_url",
-            "image_url": {"url": f"data:{mime_type};base64,{image_base64}"},
-        })
-    content.append({"type": "text", "text": prompt})
-
-    payload = {
-        "model": OPENROUTER_MODEL,
-        "messages": [{"role": "user", "content": content}],
-        "max_tokens": max_tokens,
-        "temperature": 0.2,
-    }
-    headers = {
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-        "Content-Type": "application/json",
-        "HTTP-Referer": "https://ai-trading-assistant.local",
-        "X-Title": "AI Trading Assistant",
-    }
-
-    async with httpx.AsyncClient(timeout=120, proxy=_AI_PROXY or None) as client:
-        resp = await client.post(OPENROUTER_URL, json=payload, headers=headers)
-        resp.raise_for_status()
-        body = resp.json()
-
-    raw = body["choices"][0]["message"]["content"].strip()
-    return _parse_llm_json(raw)
-
-
-# ── Gemini via Google AI Studio (native generateContent API) ─────────────────
-
-async def _call_gemini(
-    prompt: str,
-    image_base64: Optional[str] = None,
-    mime_type: str = "image/png",
-    max_tokens: int = 2048,
-) -> dict:
-    """Call Gemini via the native generateContent API with inline image data."""
-    url = f"{GEMINI_URL}/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
-
-    parts = []
-    if image_base64:
-        gemini_mime = _MIME_TO_GEMINI.get(mime_type, "image/png")
-        parts.append({
-            "inline_data": {
-                "mime_type": gemini_mime,
-                "data": image_base64,
-            }
-        })
-    parts.append({"text": prompt})
-
-    payload = {
-        "contents": [{"parts": parts}],
-        "generationConfig": {
-            "maxOutputTokens": max_tokens,
-            "temperature": 0.2,
-        },
-    }
-
-    async with httpx.AsyncClient(timeout=90, proxy=_AI_PROXY or None) as client:
-        resp = await client.post(url, json=payload)
-        resp.raise_for_status()
-        body = resp.json()
-
-    # Extract text from Gemini response
-    candidates = body.get("candidates", [])
-    if not candidates:
-        raise ValueError("Gemini returned no candidates")
-
-    content = candidates[0].get("content", {})
-    parts_out = content.get("parts", [])
-    raw = "".join(p.get("text", "") for p in parts_out).strip()
-
-    if not raw:
-        raise ValueError("Gemini returned empty text")
-
-    return _parse_llm_json(raw)
