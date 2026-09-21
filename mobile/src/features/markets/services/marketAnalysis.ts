@@ -1,6 +1,6 @@
 import { Candle } from '../../../domain/entities/Candle';
 
-export type MarketAnalysis = { direction: 'Bullish' | 'Bearish'; confidence: number; rsi: number; volatility: 'Low' | 'Moderate' | 'High'; support: number; resistance: number; currentPrice: number; summary: string };
+export type MarketAnalysis = { direction: 'Bullish' | 'Bearish' | 'Neutral'; confidence: number; rsi: number; volatility: 'Low' | 'Moderate' | 'High'; support: number; resistance: number; currentPrice: number; summary: string };
 
 function average(values: number[]) { return values.reduce((total, value) => total + value, 0) / values.length; }
 
@@ -21,7 +21,7 @@ export function analyseMarket(candles: Candle[]): MarketAnalysis | null {
   const emaSlow = average(closes.slice(-20));
   const rsi = calculateRsi(closes);
   const upwardSignals = Number(current > emaFast) + Number(emaFast > emaSlow) + Number(rsi >= 50);
-  const direction = upwardSignals >= 2 ? 'Bullish' : 'Bearish';
+  const direction = upwardSignals >= 2 ? 'Bullish' : upwardSignals <= 0 ? 'Bearish' : 'Neutral';
   const movement = closes.slice(-10).map((close, index, values) => index === 0 ? 0 : Math.abs((close - values[index - 1]) / values[index - 1]));
   const averageMovement = average(movement.slice(1));
   const volatility = averageMovement > 0.004 ? 'High' : averageMovement > 0.0015 ? 'Moderate' : 'Low';

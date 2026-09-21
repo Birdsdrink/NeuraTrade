@@ -33,6 +33,7 @@ const ARC_LENGTH = (SWEEP_DEG / 360) * 2 * Math.PI * R;
 
 interface AnimatedGaugeProps {
   score: number; // 0 - 100
+  tone?: 'bullish' | 'bearish' | 'neutral';
 }
 
 const confidenceColor = (score: number) => {
@@ -41,7 +42,14 @@ const confidenceColor = (score: number) => {
   return COLORS.green; // high
 };
 
-export default function AnimatedGauge({ score }: AnimatedGaugeProps) {
+const gaugeColor = (score: number, tone?: 'bullish' | 'bearish' | 'neutral') => {
+  if (tone === 'bullish') return COLORS.green;
+  if (tone === 'bearish') return COLORS.red;
+  if (tone === 'neutral') return COLORS.yellow;
+  return confidenceColor(score);
+};
+
+export default function AnimatedGauge({ score, tone }: AnimatedGaugeProps) {
   const progress = useSharedValue(0);
 
   useEffect(() => {
@@ -55,7 +63,7 @@ export default function AnimatedGauge({ score }: AnimatedGaugeProps) {
     strokeDashoffset: ARC_LENGTH * (1 - progress.value),
   }));
 
-  const color = confidenceColor(score);
+  const color = gaugeColor(score, tone);
 
   return (
     <View style={{ width: SIZE, height: SIZE }}>

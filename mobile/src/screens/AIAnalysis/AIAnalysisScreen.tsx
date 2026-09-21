@@ -8,6 +8,7 @@ import { useMarketDetail } from '../../features/markets/hooks/useMarketDetail';
 import { useLiveCandles } from '../../features/markets/hooks/useLiveCandles';
 import { analyseMarket } from '../../features/markets/services/marketAnalysis';
 import { useMarkets } from '../../features/markets/hooks/useMarkets';
+import { maybeSendAlignedSignalNotification, updateLiveSignal } from '../../services/signalNotifications';
 
 const TIMEFRAMES: Record<string, number> = { '1m': 60, '5m': 300, '15m': 900, '30m': 1800, '1H': 3600, '4H': 14400, '1D': 86400 };
 
@@ -15,6 +16,21 @@ function formatPrice(price: number) {
   // Forex-range prices keep 5 decimals so tick-level movement is visible in
   // the live analysis statement; large instruments stay at 2 decimals.
   return price >= 1000 ? price.toLocaleString(undefined, { maximumFractionDigits: 2 }) : price >= 1 ? price.toFixed(5) : price.toFixed(6);
+}
+
+function getDynamicVolatility(candles: any[]) {
+  if (!candles || candles.length < 2) return { label: 'Low', value: 0 };
+
+  const sample = candles.slice(-20);
+  const moves = sample.slice(1).map((candle, index) => {
+    const prev = sample[index];
+    if (!prev || prev.close === 0) return 0;
+    return Math.abs((candle.close - prev.close) / prev.close);
+  });
+
+  const avgMove = moves.reduce((total, value) => total + value, 0) / Math.max(moves.length, 1);
+  const label = avgMove > 0.004 ? 'High' : avgMove > 0.0015 ? 'Moderate' : 'Low';
+  return { label, value: avgMove };
 }
 
 export default function AIAnalysisScreen({ navigation, market, timeframe }: { navigation: (screen: 'Markets' | 'MarketDetail' | 'AIAnalysis' | 'Watchlist' | 'FundamentalAnalysis' | 'Settings') => void; market: Market | null; timeframe: string }) {
@@ -33,7 +49,18 @@ export default function AIAnalysisScreen({ navigation, market, timeframe }: { na
   const { data: historicalCandles = [], isLoading, isError, refetch } = useMarketDetail(symbol, TIMEFRAMES[selectedTimeframe] ?? 3600, 100, 5);
   const { candles } = useLiveCandles(symbol, TIMEFRAMES[selectedTimeframe] ?? 3600, historicalCandles);
   const analysis = analyseMarket(candles);
-  const directionColor = analysis?.direction === 'Bullish' ? COLORS.green : COLORS.red;
+  const dynamicVolatility = getDynamicVolatility(candles);
+  const directionColor = analysis?.direction === 'Bullish' ? COLORS.green : analysis?.direction === 'Bearish' ? COLORS.red : COLORS.yellow;
+
+  useEffect(() => {
+    if (!selectedMarket || !analysis) return;
+    updateLiveSignal(selectedMarket.symbol, analysis.direction);
+    maybeSendAlignedSignalNotification({
+      symbol: selectedMarket.symbol,
+      displayName: selectedMarket.displayName ?? selectedMarket.symbol,
+      liveSignal: analysis.direction,
+    });
+  }, [selectedMarket, analysis]);
 
   return (
     <ScrollView contentContainerStyle={{ padding: 20, paddingBottom: 140 }} showsVerticalScrollIndicator={false}>
@@ -72,9 +99,25 @@ export default function AIAnalysisScreen({ navigation, market, timeframe }: { na
 
       {analysis ? <>
         <View style={{ backgroundColor: COLORS.cardBg, borderRadius: 22, padding: 20, marginBottom: 16, borderWidth: 1, borderColor: COLORS.subtleBorder }}>
-          <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 8 }}>
-            <MaterialCommunityIcons name="star-four-points" size={20} color={COLORS.purple} />
-            <Text style={{ color: COLORS.purple, fontWeight: '600', fontSize: 13, marginLeft: 6 }}>TIMEFRAME SIGNAL</Text>
+          <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+              <MaterialCommunityIcons name="pulse" size={20} color={COLORS.purple} />
+              <Text style={{ color: COLORS.purple, fontWeight: '600', fontSize: 13, marginLeft: 6 }}>LIVE SIGNAL</Text>
+            </View>
+            <View
+              style={{
+                paddingHorizontal: 10,
+                paddingVertical: 6,
+                borderRadius: 999,
+                backgroundColor: analysis.direction === 'Bullish' ? `${COLORS.green}22` : analysis.direction === 'Bearish' ? `${COLORS.red}22` : `${COLORS.yellow}22`,
+                borderWidth: 1,
+                borderColor: analysis.direction === 'Bullish' ? COLORS.green : analysis.direction === 'Bearish' ? COLORS.red : COLORS.yellow,
+              }}
+            >
+              <Text style={{ color: directionColor, fontSize: 11, fontWeight: '800', letterSpacing: 0.7 }}>
+                {analysis.direction === 'Bullish' ? 'BUY' : analysis.direction === 'Bearish' ? 'SELL' : 'WAIT'}
+              </Text>
+            </View>
           </View>
           <Text style={{ fontSize: 22, fontWeight: 'bold', color: directionColor, marginVertical: 8 }}>{analysis.direction}</Text>
           <Text style={{ color: COLORS.textSecondary, fontSize: 13, lineHeight: 18 }}>{analysis.summary}</Text>
@@ -85,10 +128,10 @@ export default function AIAnalysisScreen({ navigation, market, timeframe }: { na
         </View>
         <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 12 }}>
           <Metric label="TREND" value={analysis.direction} detail="10 / 20 candle averages" color={directionColor} />
-          <Metric label="MOMENTUM" value={analysis.rsi >= 50 ? 'Positive' : 'Negative'} detail={`RSI ${analysis.rsi.toFixed(1)}`} color={analysis.rsi >= 50 ? COLORS.green : COLORS.red} />
+          <Metric label="MOMENTUM" value={analysis.rsi >= 50 ? 'Positive' : analysis.rsi <= 50 ? 'Neutral' : 'Negative'} detail={`RSI ${analysis.rsi.toFixed(1)}`} color={analysis.rsi >= 55 ? COLORS.green : analysis.rsi <= 45 ? COLORS.red : COLORS.yellow} />
         </View>
         <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
-          <Metric label="VOLATILITY" value={analysis.volatility} detail="Recent candle movement" color={COLORS.yellow} />
+          <Metric label="VOLATILITY" value={`${dynamicVolatility.label} • ${(dynamicVolatility.value * 100).toFixed(2)}%`} detail="Recent candle movement" color={COLORS.yellow} />
           <Metric label="TIMEFRAME" value={selectedTimeframe} detail={`${candles.length} backend candles`} color={COLORS.purple} />
         </View>
         <View style={{ backgroundColor: COLORS.cardBg, borderRadius: 18, padding: 16, marginTop: 12, borderWidth: 1, borderColor: COLORS.subtleBorder }}>

@@ -6,10 +6,11 @@ import COLORS from '../../../theme/colors';
 interface Props {
   title: string;
   content: string;
+  defaultOpen?: boolean;
 }
 
-export default function Accordion({ title, content }: Props) {
-  const [open, setOpen] = useState(false);
+export default function Accordion({ title, content, defaultOpen = false }: Props) {
+  const [open, setOpen] = useState(defaultOpen);
 
   return (
     <View style={[styles.item, open && styles.itemOpen]}>

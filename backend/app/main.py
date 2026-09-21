@@ -14,11 +14,28 @@ from .application.market_data_service import MarketDataService
 logger = logging.getLogger(__name__)
 
 
+def _get_allowed_origins() -> list[str]:
+    configured = os.getenv("CORS_ALLOWED_ORIGINS", "")
+    origins = [origin.strip() for origin in configured.split(",") if origin.strip()]
+    defaults = [
+        "http://localhost:8081",
+        "http://127.0.0.1:8081",
+        "http://0.0.0.0:8081",
+        "http://192.168.43.79:8081",
+        "http://192.168.43.79:8000",
+        "http://10.0.2.2:8081",
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ]
+    return list(dict.fromkeys(origins + defaults))
+
+
 app = FastAPI(title="Deriv AI Market Analysis Assistant - Backend")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_get_allowed_origins(),
+    allow_origin_regex=r"https?://(localhost|127\.0\.0\.1|0\.0\.0\.0|10\.0\.2\.2|192\.168\.\d+\.\d+)(:\d+)?$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

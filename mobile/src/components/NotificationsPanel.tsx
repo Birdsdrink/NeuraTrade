@@ -93,10 +93,7 @@ export default function NotificationsPanel({ visible, onClose }: Props) {
             borderColor: COLORS.subtleBorder,
             overflow: 'hidden',
             elevation: 8,
-            shadowColor: '#000',
-            shadowOffset: { width: 0, height: 4 },
-            shadowOpacity: 0.3,
-            shadowRadius: 8,
+            boxShadow: '0px 4px 8px rgba(0,0,0,0.3)',
           }}
           onPress={(e) => e.stopPropagation()}
         >

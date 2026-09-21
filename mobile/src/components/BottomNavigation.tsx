@@ -13,16 +13,17 @@ type Props = {
   setCurrentScreen: (screen: Screen) => void;
 };
 
-const { width } = Dimensions.get('window');
+const { width, height } = Dimensions.get('window');
+const isSmallDevice = width < 360 || height < 700;
 
 // Full-width dock, rounded pill, with its bottom dipping slightly below the screen edge
 const BAR_WIDTH = width;
 const NUM_TABS = 5;
 const TAB_WIDTH = BAR_WIDTH / NUM_TABS;
-const BAR_HEIGHT = 74; // visible height of the dock
-const BOTTOM_OVERHANG = 18; // how far the rounded bottom tucks below the screen
+const BAR_HEIGHT = isSmallDevice ? 66 : 74; // visible height of the dock
+const BOTTOM_OVERHANG = isSmallDevice ? 14 : 18; // how far the rounded bottom tucks below the screen
 const DOCK_HEIGHT = BAR_HEIGHT + BOTTOM_OVERHANG;
-const DOCK_RADIUS = 32;
+const DOCK_RADIUS = isSmallDevice ? 26 : 32;
 
 const ACCENT = COLORS.blue;
 
@@ -32,18 +33,18 @@ const BAR_COLOR = '#0a0a0c';
 const SCREEN_BG = COLORS.bgPrimary; // used for the notch "cutout" behind the floating circle
 
 // How far the active icon raises up out of the bar (into the floating circle)
-const ICON_RAISE = 26;
+const ICON_RAISE = isSmallDevice ? 20 : 26;
 
 // Notch / floating circle geometry
-const NOTCH_SIZE = 58;
-const CIRCLE_SIZE = 46;
+const NOTCH_SIZE = isSmallDevice ? 50 : 58;
+const CIRCLE_SIZE = isSmallDevice ? 40 : 46;
 
 const ITEMS: { tab: Tab; screen: Screen; label: string; icon: (color: string) => React.ReactNode }[] = [
-  { tab: 'Markets', screen: 'Markets', label: 'Markets', icon: (color) => <Ionicons name="home-outline" size={22} color={color} /> },
-  { tab: 'ChartAI', screen: 'Watchlist', label: 'Technicals', icon: (color) => <MaterialCommunityIcons name="chart-timeline-variant" size={21} color={color} /> },
-  { tab: 'Analysis', screen: 'AIAnalysis', label: 'Signals', icon: (color) => <MaterialCommunityIcons name="star-four-points" size={21} color={color} /> },
-  { tab: 'Fundamental', screen: 'FundamentalAnalysis', label: 'News', icon: (color) => <MaterialCommunityIcons name="newspaper-variant-outline" size={21} color={color} /> },
-  { tab: 'Settings', screen: 'Settings', label: 'Settings', icon: (color) => <Feather name="settings" size={21} color={color} /> },
+  { tab: 'Markets', screen: 'Markets', label: 'Markets', icon: (color) => <Ionicons name="home-outline" size={isSmallDevice ? 18 : 22} color={color} /> },
+  { tab: 'ChartAI', screen: 'Watchlist', label: 'Technicals', icon: (color) => <MaterialCommunityIcons name="chart-timeline-variant" size={isSmallDevice ? 18 : 21} color={color} /> },
+  { tab: 'Analysis', screen: 'AIAnalysis', label: 'Signals', icon: (color) => <MaterialCommunityIcons name="star-four-points" size={isSmallDevice ? 18 : 21} color={color} /> },
+  { tab: 'Fundamental', screen: 'FundamentalAnalysis', label: 'News', icon: (color) => <MaterialCommunityIcons name="newspaper-variant-outline" size={isSmallDevice ? 18 : 21} color={color} /> },
+  { tab: 'Settings', screen: 'Settings', label: 'Settings', icon: (color) => <Feather name="settings" size={isSmallDevice ? 18 : 21} color={color} /> },
 ];
 
 // SVG path for the accent line — flipped to the TOP of the dock ("upside down" vs the old bottom line).
@@ -118,7 +119,7 @@ export default function BottomNavigation({ activeTab, setActiveTab, setCurrentSc
   };
 
   return (
-    <View pointerEvents="box-none" style={styles.wrapper}>
+    <View style={[styles.wrapper, { pointerEvents: 'box-none' }]}>
       <View style={styles.tabBarContainer}>
         {/* Animated SVG continuous accent line (top of the dock) */}
         <Animated.View
@@ -139,8 +140,7 @@ export default function BottomNavigation({ activeTab, setActiveTab, setCurrentSc
         <Svg
           width={BAR_WIDTH}
           height={BAR_HEIGHT}
-          style={{ position: 'absolute', top: 0, left: 0 }}
-          pointerEvents="none"
+          style={{ position: 'absolute', top: 0, left: 0, pointerEvents: 'none' }}
         >
           <Defs>
             <LinearGradient id="fadeLeft" x1="0" y1="0" x2={FADE_W} y2="0" gradientUnits="userSpaceOnUse">
@@ -186,13 +186,14 @@ export default function BottomNavigation({ activeTab, setActiveTab, setCurrentSc
                 activeOpacity={0.8}
                 onPress={() => select(item, index)}
               >
-                <Animated.View style={{ transform: [{ translateY }] }}>
-                  <View style={styles.iconContainer}>
-                    <Animated.View style={[isActive && { transform: [{ scale: popAnim }] }]}>
-                      {item.icon(isActive ? ACCENT : '#a0a0a0')}
-                    </Animated.View>
-                  </View>
-                </Animated.View>
+                <View style={isActive ? styles.activeIconContainer : styles.iconContainer}>
+                  <Animated.View style={[
+                    isActive && { transform: [{ translateY }, { scale: popAnim }] },
+                    !isActive && { transform: [{ translateY: 0 }] },
+                  ]}>
+                    {item.icon(isActive ? ACCENT : '#a0a0a0')}
+                  </Animated.View>
+                </View>
 
                 <Text numberOfLines={1} style={[styles.tabText, isActive && styles.tabTextActive]}>
                   {item.label}
@@ -218,17 +219,14 @@ const styles = StyleSheet.create({
     height: DOCK_HEIGHT,
     position: 'relative',
     backgroundColor: BAR_COLOR,
-    borderRadius: DOCK_RADIUS,
+    borderTopLeftRadius: 0,
+    borderTopRightRadius: 0,
+    borderBottomLeftRadius: DOCK_RADIUS,
+    borderBottomRightRadius: DOCK_RADIUS,
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.06)',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: -10 },
-    shadowOpacity: 0.35,
-    shadowRadius: 20,
+    boxShadow: '0px -10px 20px rgba(0,0,0,0.35)',
     elevation: 20,
-    // overflow is visible so the notch/floating circle can poke above the dock's top edge.
-    // The accent line is erased by the edge fades before it reaches the rounded corners,
-    // so nothing bleeds out of the pill.
   },
   slidingIndicatorContainer: {
     position: 'absolute',
@@ -257,10 +255,7 @@ const styles = StyleSheet.create({
     backgroundColor: BAR_COLOR,
     borderWidth: 1.5,
     borderColor: 'rgba(255,255,255,0.12)',
-    shadowColor: ACCENT,
-    shadowOffset: { width: 0, height: 0 },
-    shadowOpacity: 0.45,
-    shadowRadius: 12,
+    boxShadow: `0px 0px 12px ${ACCENT}66`,
     elevation: 8,
     marginTop: 6,
   },
@@ -278,16 +273,25 @@ const styles = StyleSheet.create({
     height: '100%',
     justifyContent: 'center',
     alignItems: 'center',
-    paddingTop: 8,
+    paddingTop: isSmallDevice ? 2 : 4,
+    paddingBottom: 2,
   },
   iconContainer: {
-    marginBottom: 6,
+    marginBottom: isSmallDevice ? 2 : 3,
+  },
+  activeIconContainer: {
+    width: CIRCLE_SIZE,
+    height: CIRCLE_SIZE,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: isSmallDevice ? 2 : 3,
   },
   tabText: {
-    fontSize: 10,
+    fontSize: isSmallDevice ? 9 : 10,
     color: '#a0a0a0',
     fontWeight: '500',
-    maxWidth: TAB_WIDTH - 6,
+    maxWidth: TAB_WIDTH - 8,
+    lineHeight: isSmallDevice ? 10 : 11,
   },
   tabTextActive: {
     color: '#ffffff',

@@ -10,8 +10,18 @@ export default function SplashScreen({ onFinish }: { onFinish: () => void }) {
   useEffect(() => {
     // Logo fade + scale in
     Animated.parallel([
-      Animated.timing(fade, { toValue: 1, duration: 600, easing: Easing.out(Easing.cubic), useNativeDriver: true }),
-      Animated.spring(scale, { toValue: 1, friction: 6, tension: 40, useNativeDriver: true }),
+      Animated.timing(fade, {
+        toValue: 1,
+        duration: 600,
+        easing: Easing.out(Easing.cubic),
+        useNativeDriver: false,
+      }),
+      Animated.spring(scale, {
+        toValue: 1,
+        friction: 6,
+        tension: 40,
+        useNativeDriver: false,
+      }),
     ]).start();
 
     // Loading dots cascade
@@ -19,8 +29,8 @@ export default function SplashScreen({ onFinish }: { onFinish: () => void }) {
       Animated.loop(
         Animated.sequence([
           Animated.delay(i * 200),
-          Animated.timing(dot, { toValue: 1, duration: 300, useNativeDriver: true }),
-          Animated.timing(dot, { toValue: 0.3, duration: 300, useNativeDriver: true }),
+          Animated.timing(dot, { toValue: 1, duration: 300, useNativeDriver: false }),
+          Animated.timing(dot, { toValue: 0.3, duration: 300, useNativeDriver: false }),
         ])
       )
     );

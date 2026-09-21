@@ -36,6 +36,10 @@ export interface AiAnalysis {
     positionSize: string;
   };
   multiTimeframe: {
+    '1m': string;
+    '5m': string;
+    '15m': string;
+    '30m': string;
     weekly: string;
     daily: string;
     h4: string;
@@ -79,6 +83,10 @@ export const mockAiAnalysis: AiAnalysis = {
     positionSize: 'Conservative',
   },
   multiTimeframe: {
+    '1m': 'Bullish',
+    '5m': 'Bullish',
+    '15m': 'Bullish',
+    '30m': 'Bullish',
     weekly: 'Bullish',
     daily: 'Bullish',
     h4: 'Overextended',

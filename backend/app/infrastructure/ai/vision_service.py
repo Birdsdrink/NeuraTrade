@@ -319,6 +319,74 @@ def _compute_basic_indicators(candles: list[dict]) -> dict:
     return {"rsi": rsi, "sma_10": sma_10, "sma_20": sma_20, "sma_50": sma_50}
 
 
+def _detect_candlestick_patterns(candles: list[dict]) -> list[str]:
+    """Return a small set of clearly identifiable candlestick reversal patterns."""
+    if len(candles) < 3:
+        return []
+
+    patterns: list[str] = []
+
+    for idx in range(1, len(candles) - 1):
+        prev = candles[idx - 1]
+        curr = candles[idx]
+        next_c = candles[idx + 1]
+
+        if not all(k in prev and k in curr for k in ("open", "high", "low", "close")):
+            continue
+
+        prev_open = float(prev["open"])
+        prev_close = float(prev["close"])
+        curr_open = float(curr["open"])
+        curr_close = float(curr["close"])
+        curr_high = float(curr["high"])
+        curr_low = float(curr["low"])
+        prev_high = float(prev["high"])
+        prev_low = float(prev["low"])
+
+        prev_body = abs(prev_close - prev_open)
+        curr_body = abs(curr_close - curr_open)
+        curr_range = curr_high - curr_low
+        prev_range = prev_high - prev_low
+        if curr_range == 0:
+            continue
+
+        if prev_close < prev_open and curr_close > curr_open and curr_open <= prev_close and curr_close >= prev_open:
+            if curr_body > prev_body * 0.8:
+                patterns.append("Bullish Engulfing")
+
+        if prev_close > prev_open and curr_close < curr_open and curr_open >= prev_close and curr_close <= prev_open:
+            if curr_body > prev_body * 0.8:
+                patterns.append("Bearish Engulfing")
+
+        if abs(curr_close - curr_open) <= max(0.05, curr_range * 0.1):
+            if curr_high - max(curr_open, curr_close) < curr_range * 0.25 and min(curr_open, curr_close) - curr_low < curr_range * 0.25:
+                patterns.append("Doji")
+
+        bullish_hammer = (
+            curr_close > curr_open and
+            (curr_low - min(curr_open, curr_close)) >= max(curr_body * 2, curr_range * 0.6) and
+            (max(curr_open, curr_close) - curr_high) <= curr_range * 0.2
+        )
+        if bullish_hammer:
+            patterns.append("Hammer")
+
+        bearish_hanging = (
+            curr_close < curr_open and
+            (max(curr_open, curr_close) - curr_high) >= max(curr_body * 2, curr_range * 0.6) and
+            (curr_low - min(curr_open, curr_close)) <= curr_range * 0.2
+        )
+        if bearish_hanging:
+            patterns.append("Hanging Man")
+
+    deduped: list[str] = []
+    seen = set()
+    for item in patterns:
+        if item not in seen:
+            seen.add(item)
+            deduped.append(item)
+    return deduped[:6]
+
+
 def _detect_direction(candles: list[dict]) -> dict:
     """Deterministically classify trend direction from candle data."""
     closes = [c.get("close") for c in candles if c.get("close") is not None]
@@ -459,6 +527,11 @@ async def analyse_candles(
             if not result.get("reasons"):
                 result["reasons"] = det.get("reasons", [])
 
+    if not result.get("candlestick_patterns"):
+        detected = _detect_candlestick_patterns(candles)
+        if detected:
+            result["candlestick_patterns"] = detected
+
     ind = result.get("indicators", {})
     if ind.get("rsi") is None and computed.get("rsi") is not None:
         ind["rsi"] = computed["rsi"]
@@ -510,7 +583,7 @@ _DASHBOARD_EMPTY = {
         "rr_ratio": "-",
         "position_size": "Conservative",
     },
-    "multi_timeframe": {"weekly": "-", "daily": "-", "h4": "-", "h1": "-"},
+    "multi_timeframe": {"1m": "-", "5m": "-", "15m": "-", "30m": "-", "weekly": "-", "daily": "-", "h4": "-", "h1": "-"},
     "smc": {
         "fvg": "-",
         "bullish_ob": "-",
@@ -549,6 +622,10 @@ DASHBOARD_SCHEMA = json.dumps({
         "positionSize": "Conservative | Moderate | Aggressive",
     },
     "multiTimeframe": {
+        "1m": "Bullish | Bearish | Neutral",
+        "5m": "Bullish | Bearish | Neutral",
+        "15m": "Bullish | Bearish | Neutral",
+        "30m": "Bullish | Bearish | Neutral",
         "weekly": "Bullish | Bearish | Neutral",
         "daily": "Bullish | Bearish | Neutral",
         "h4": "Overextended | Trending | Consolidating",
@@ -658,7 +735,7 @@ def _normalise_dashboard(result: dict, symbol: str = "", timeframe: str = "") ->
 
     mt = result.get("multi_timeframe") or result.get("multiTimeframe") or {}
     if isinstance(mt, dict):
-        for key in ("weekly", "daily", "h4", "h1"):
+        for key in ("1m", "5m", "15m", "30m", "weekly", "daily", "h4", "h1"):
             val = mt.get(key)
             if val:
                 out["multi_timeframe"][key] = str(val)
@@ -798,6 +875,10 @@ def _dashboard_public_payload(payload: dict) -> dict:
             "positionSize": choice(value(trade, "position_size", "positionSize", "Conservative"), ("Conservative", "Moderate", "Aggressive"), "Conservative"),
         },
         "multiTimeframe": {
+            "1m": choice(value(multi, "1m", "1m", "Neutral"), ("Bullish", "Bearish", "Neutral"), "Neutral"),
+            "5m": choice(value(multi, "5m", "5m", "Neutral"), ("Bullish", "Bearish", "Neutral"), "Neutral"),
+            "15m": choice(value(multi, "15m", "15m", "Neutral"), ("Bullish", "Bearish", "Neutral"), "Neutral"),
+            "30m": choice(value(multi, "30m", "30m", "Neutral"), ("Bullish", "Bearish", "Neutral"), "Neutral"),
             "weekly": choice(value(multi, "weekly", "weekly", "Neutral"), ("Bullish", "Bearish", "Neutral"), "Neutral"),
             "daily": choice(value(multi, "daily", "daily", "Neutral"), ("Bullish", "Bearish", "Neutral"), "Neutral"),
             "h4": choice(value(multi, "h4", "h4", "Consolidating"), ("Overextended", "Trending", "Consolidating"), "Consolidating"),
@@ -850,6 +931,9 @@ def _analysis_to_dashboard(analysis: dict, symbol: str, timeframe: str, candles:
     support = analysis.get("support_levels") or []
     resistance = analysis.get("resistance_levels") or []
     patterns = analysis.get("candlestick_patterns") or []
+    if not patterns and candles:
+        patterns = _detect_candlestick_patterns(candles)
+        analysis["candlestick_patterns"] = patterns
     rsi = indicators.get("rsi")
     mas = indicators.get("moving_averages") or []
 
@@ -1012,6 +1096,10 @@ def _analysis_to_dashboard(analysis: dict, symbol: str, timeframe: str, candles:
 
     direction_label = out["insights"]["trend"]
     out["multi_timeframe"] = {
+        "1m": direction_label,
+        "5m": direction_label,
+        "15m": direction_label,
+        "30m": direction_label,
         "weekly": direction_label,
         "daily": direction_label,
         "h4": out["insights"]["momentum"],

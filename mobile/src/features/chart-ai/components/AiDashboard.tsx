@@ -1,5 +1,5 @@
 import React from 'react';
-import { View, Text, StyleSheet } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import COLORS from '../../../theme/colors';
 import AnimatedGauge from './AnimatedGauge';
@@ -19,6 +19,10 @@ const semanticColor = (value: string): string | undefined => {
 };
 
 const LEVEL_LABELS: Record<string, string> = {
+  '1m': '1M',
+  '5m': '5M',
+  '15m': '15M',
+  '30m': '30M',
   weekly: 'Weekly',
   daily: 'Daily',
   h4: '4H Struct',
@@ -31,6 +35,37 @@ interface AiDashboardProps {
   meta?: { symbol?: string; timeframe?: string; currentPrice?: number | null } | null;
 }
 
+function CollapsibleSection({
+  title,
+  icon,
+  defaultOpen = false,
+  children,
+}: {
+  title: string;
+  icon: keyof typeof MaterialCommunityIcons.glyphMap;
+  defaultOpen?: boolean;
+  children: React.ReactNode;
+}) {
+  const [open, setOpen] = React.useState(defaultOpen);
+
+  return (
+    <View style={[styles.collapsibleCard, open && styles.collapsibleCardOpen]}>
+      <TouchableOpacity activeOpacity={0.8} onPress={() => setOpen((v) => !v)} style={styles.collapsibleHeader}>
+        <View style={styles.collapsibleIcon}>
+          <MaterialCommunityIcons name={icon} size={15} color={COLORS.purple} />
+        </View>
+        <Text style={styles.collapsibleTitle}>{title}</Text>
+        <MaterialCommunityIcons
+          name={open ? 'chevron-up' : 'chevron-down'}
+          size={18}
+          color={COLORS.textMuted}
+        />
+      </TouchableOpacity>
+      {open && <View style={styles.collapsibleBody}>{children}</View>}
+    </View>
+  );
+}
+
 export default function AiDashboard({ data, warnings, meta }: AiDashboardProps) {
   const metaLine = meta?.symbol
     ? `${meta.symbol}${meta.timeframe ? ` · ${meta.timeframe}` : ''}${
@@ -41,13 +76,17 @@ export default function AiDashboard({ data, warnings, meta }: AiDashboardProps) 
   const trendLower = (data.insights?.trend ?? '').toLowerCase();
   const isBullish = trendLower.includes('bullish');
   const isBearish = trendLower.includes('bearish');
+  const isNeutral = !isBullish && !isBearish;
+  const trendTone = isBullish ? 'bullish' : isBearish ? 'bearish' : 'neutral';
+  const trendLabel = isBullish ? 'BULLISH TREND' : isBearish ? 'BEARISH TREND' : 'NEUTRAL TREND';
+  const showTradeSetup = !isNeutral;
 
   return (
     <View>
       {/* ── Confidence gauge + status ─────────────────────────────────── */}
       <View style={styles.gaugeCard}>
         {metaLine ? <Text style={styles.metaLine}>{metaLine}</Text> : null}
-        <AnimatedGauge score={data.score} />
+        <AnimatedGauge score={data.score} tone={trendTone} />
         <Text style={styles.confidenceCaption}>AI CONFIDENCE SCORE</Text>
         <View
           style={[
@@ -84,40 +123,42 @@ export default function AiDashboard({ data, warnings, meta }: AiDashboardProps) 
         <InsightCard icon="thought-bubble-outline" label="SENTIMENT" value={data.insights.sentiment} />
       </View>
 
-      {/* ── Trade Setup — conditional based on direction ──────────────── */}
-      <SectionCard title="Trade Setup" icon="swap-vertical-bold">
-        <View style={styles.actionRow}>
-          <Text style={styles.actionLabel}>ACTION</Text>
-          <Text style={[styles.actionValue, { color: semanticColor(data.tradePlan.action) ?? COLORS.yellow }]}>
-            {data.tradePlan.action}
-          </Text>
-        </View>
-        <View style={styles.actionDivider} />
+      {/* ── Trade Setup — hidden when the AI score is neutral ─────── */}
+      {showTradeSetup && (
+        <CollapsibleSection title="Trade Setup" icon="swap-vertical-bold">
+          <View style={styles.actionRow}>
+            <Text style={styles.actionLabel}>ACTION</Text>
+            <Text style={[styles.actionValue, { color: semanticColor(data.tradePlan.action) ?? COLORS.yellow }]}>
+              {data.tradePlan.action}
+            </Text>
+          </View>
+          <View style={styles.actionDivider} />
 
-        {/* Show buy info only when bullish */}
-        {isBullish && (
-          <>
-            <KVRow label="When to Buy" value={data.tradePlan.whenToBuy} valueColor={COLORS.green} />
-          </>
-        )}
+          {/* Show buy info only when bullish */}
+          {isBullish && (
+            <>
+              <KVRow label="When to Buy" value={data.tradePlan.whenToBuy} valueColor={COLORS.green} />
+            </>
+          )}
 
-        {/* Show sell info only when bearish */}
-        {isBearish && (
-          <>
-            <KVRow label="When to Sell" value={data.tradePlan.whenToSell} valueColor={COLORS.red} />
-          </>
-        )}
+          {/* Show sell info only when bearish */}
+          {isBearish && (
+            <>
+              <KVRow label="When to Sell" value={data.tradePlan.whenToSell} valueColor={COLORS.red} />
+            </>
+          )}
 
-        <KVRow label="When to Exit" value={data.tradePlan.whenToExit} valueColor={COLORS.yellow} />
-        <View style={styles.actionDivider} />
-        <KVRow label="Stop Loss" value={data.tradePlan.stopLoss} valueColor={COLORS.red} />
-        <KVRow label="RR Ratio" value={data.tradePlan.rrRatio} />
-        <KVRow label="Position Size" value={data.tradePlan.positionSize} />
-      </SectionCard>
+          <KVRow label="When to Exit" value={data.tradePlan.whenToExit} valueColor={COLORS.yellow} />
+          <View style={styles.actionDivider} />
+          <KVRow label="Stop Loss" value={data.tradePlan.stopLoss} valueColor={COLORS.red} />
+          <KVRow label="RR Ratio" value={data.tradePlan.rrRatio} />
+          <KVRow label="Position Size" value={data.tradePlan.positionSize} />
+        </CollapsibleSection>
+      )}
 
       {/* ── Multi-Timeframe ───────────────────────────────────────────── */}
-      <SectionCard title="Multi-Timeframe" icon="chart-multiple">
-        {(Object.keys(data.multiTimeframe) as Array<keyof typeof data.multiTimeframe>).map((k) => (
+      <CollapsibleSection title="Multi-Timeframe" icon="chart-multiple">
+        {(['weekly', 'daily', 'h4', 'h1', '30m', '15m', '5m', '1m'] as Array<keyof typeof data.multiTimeframe>).map((k) => (
           <KVRow
             key={k}
             label={LEVEL_LABELS[k] ?? k}
@@ -125,12 +166,17 @@ export default function AiDashboard({ data, warnings, meta }: AiDashboardProps) 
             valueColor={semanticColor(data.multiTimeframe[k])}
           />
         ))}
-      </SectionCard>
+      </CollapsibleSection>
 
       {/* ── Detailed breakdown accordions ─────────────────────────────── */}
       <Text style={styles.sectionHeading}>DETAILED BREAKDOWN</Text>
       {data.breakdown.map((item) => (
-        <Accordion key={item.title} title={item.title} content={item.content} />
+        <Accordion
+          key={item.title}
+          title={item.title}
+          content={item.content}
+          defaultOpen={item.title.toLowerCase().includes('candlestick')}
+        />
       ))}
 
       {/* ── Warnings ──────────────────────────────────────────────────── */}
@@ -162,6 +208,13 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     letterSpacing: 1.5,
     marginTop: 10,
+  },
+  trendCaption: {
+    marginTop: 8,
+    fontSize: 12,
+    fontWeight: '800',
+    letterSpacing: 1.1,
+    textTransform: 'uppercase',
   },
   statusPill: {
     marginTop: 12,
@@ -234,6 +287,43 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '600',
     marginBottom: 8,
+  },
+  collapsibleCard: {
+    backgroundColor: COLORS.cardBg,
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: COLORS.subtleBorder,
+    marginBottom: 12,
+    overflow: 'hidden',
+  },
+  collapsibleCardOpen: {
+    borderColor: 'rgba(117,87,247,0.4)',
+  },
+  collapsibleHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 14,
+    paddingVertical: 13,
+  },
+  collapsibleBody: {
+    paddingHorizontal: 14,
+    paddingBottom: 14,
+  },
+  collapsibleIcon: {
+    width: 26,
+    height: 26,
+    borderRadius: 8,
+    backgroundColor: 'rgba(117,87,247,0.15)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 8,
+  },
+  collapsibleTitle: {
+    color: COLORS.textPrimary,
+    fontWeight: '700',
+    fontSize: 13,
+    letterSpacing: 0.4,
+    flex: 1,
   },
   warnCard: {
     backgroundColor: 'rgba(239,68,68,0.08)',

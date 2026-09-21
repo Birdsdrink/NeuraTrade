@@ -1,9 +1,8 @@
 import React, { useState } from 'react';
 import {
-  ScrollView, View, Text, TouchableOpacity, TextInput,
-  ActivityIndicator, Platform,
+  ScrollView, View, Text, TouchableOpacity,
+  ActivityIndicator,
 } from 'react-native';
-import { MaterialCommunityIcons } from '@expo/vector-icons';
 import COLORS from '../../theme/colors';
 import AppHeader from '../../components/AppHeader';
 import { useMarkets } from '../../features/markets/hooks/useMarkets';
@@ -31,7 +30,7 @@ interface DashboardPayload {
     rrRatio?: string;
     positionSize?: string;
   };
-  multiTimeframe?: { weekly?: string; daily?: string; h4?: string; h1?: string };
+  multiTimeframe?: { '1m'?: string; '5m'?: string; '15m'?: string; '30m'?: string; weekly?: string; daily?: string; h4?: string; h1?: string };
   smc?: { fvg?: string; bullishOb?: string; bearishOb?: string; buySideLiq?: string; sellSideLiq?: string };
   breakdown?: { title: string; content: string }[];
   warnings?: string[];
@@ -52,21 +51,9 @@ export default function ChartAnalysisScreen({
   const [selectedMarket, setSelectedMarket] = useState<Market | null>(preselectedMarket ?? null);
   const { settings } = useSettings();
   const [selectedTimeframe, setSelectedTimeframe] = useState(settings.defaultTimeframe);
-  const [searchQuery, setSearchQuery] = useState('');
   const [dashboard, setDashboard] = useState<DashboardPayload | null>(null);
   const [dashLoading, setDashLoading] = useState(false);
   const { data: markets = [] } = useMarkets();
-
-  const filteredMarkets = searchQuery.trim()
-    ? markets.filter((m) => {
-        const q = searchQuery.toLowerCase();
-        return (
-          m.symbol.toLowerCase().includes(q) ||
-          (m.displayName ?? '').toLowerCase().includes(q) ||
-          (m.market ?? '').toLowerCase().includes(q)
-        );
-      })
-    : markets;
 
   /** Map the compact dashboard response into the display component's shape. */
   const toAiAnalysis = (d: DashboardPayload): AiAnalysis => ({
@@ -96,6 +83,10 @@ export default function ChartAnalysisScreen({
       positionSize: d.tradePlan?.positionSize ?? '-',
     },
     multiTimeframe: {
+      '1m': d.multiTimeframe?.['1m'] ?? 'Neutral',
+      '5m': d.multiTimeframe?.['5m'] ?? 'Neutral',
+      '15m': d.multiTimeframe?.['15m'] ?? 'Neutral',
+      '30m': d.multiTimeframe?.['30m'] ?? 'Neutral',
       weekly: d.multiTimeframe?.weekly ?? 'Neutral',
       daily: d.multiTimeframe?.daily ?? 'Neutral',
       h4: d.multiTimeframe?.h4 ?? 'Consolidating',
@@ -138,40 +129,28 @@ export default function ChartAnalysisScreen({
       <ScrollView contentContainerStyle={{ padding: 20, paddingBottom: 140 }} showsVerticalScrollIndicator={false}>
         <AppHeader title="Technical Analysis" subtitle="AI-powered chart & indicator analysis" />
 
-        {/* ── Instrument Selector ─────────────────────────────────── */}
+        {/* ── Instrument + timeframe selector ─────────────────────── */}
         <View style={{ marginBottom: 20 }}>
           <Text style={{ color: COLORS.textMuted, fontSize: 12, fontWeight: '600', marginBottom: 8 }}>SELECT INSTRUMENT</Text>
-          <View style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: COLORS.cardBg, borderRadius: 14, paddingHorizontal: 12, paddingVertical: 10, marginBottom: 10, borderWidth: 1, borderColor: COLORS.subtleBorder }}>
-            <MaterialCommunityIcons name="magnify" size={18} color={COLORS.textMuted} style={{ marginRight: 8 }} />
-            <TextInput
-              placeholder="Search instruments…"
-              placeholderTextColor={COLORS.textMuted}
-              value={searchQuery}
-              onChangeText={setSearchQuery}
-              style={{ flex: 1, color: COLORS.textPrimary, fontSize: 14, padding: 0 }}
-              autoCorrect={false}
-            />
-            {searchQuery.length > 0 && (
-              <TouchableOpacity onPress={() => setSearchQuery('')}>
-                <MaterialCommunityIcons name="close-circle" size={16} color={COLORS.textMuted} />
-              </TouchableOpacity>
-            )}
-          </View>
-
-          <ScrollView style={{ maxHeight: 200, marginBottom: 12 }} showsVerticalScrollIndicator={false}>
-            {filteredMarkets.slice(0, 50).map((m) => {
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 16 }}>
+            {(markets.length > 0 ? markets : selectedMarket ? [selectedMarket] : []).map((m) => {
               const active = m.symbol === selectedMarket?.symbol;
               return (
                 <TouchableOpacity
                   key={m.symbol}
                   onPress={() => setSelectedMarket(m)}
-                  style={{ paddingVertical: 10, paddingHorizontal: 14, borderRadius: 10, backgroundColor: active ? COLORS.purple : COLORS.cardBg, marginBottom: 4, borderWidth: 1, borderColor: active ? COLORS.purple : COLORS.subtleBorder }}
+                  style={{
+                    paddingHorizontal: 14,
+                    paddingVertical: 8,
+                    borderRadius: 999,
+                    backgroundColor: active ? COLORS.purple : COLORS.cardBg,
+                    marginRight: 8,
+                    borderWidth: 1,
+                    borderColor: active ? COLORS.purple : COLORS.subtleBorder,
+                  }}
                 >
-                  <Text style={{ fontSize: 14, fontWeight: '600', color: active ? COLORS.textPrimary : COLORS.textSecondary }}>
+                  <Text style={{ fontSize: 12, fontWeight: '600', color: active ? COLORS.textPrimary : COLORS.textSecondary }}>
                     {m.displayName ?? m.symbol}
-                  </Text>
-                  <Text style={{ fontSize: 11, color: active ? 'rgba(255,255,255,0.7)' : COLORS.textMuted, marginTop: 2 }}>
-                    {m.symbol} · {m.market ?? ''}
                   </Text>
                 </TouchableOpacity>
               );
