@@ -256,3 +256,27 @@ def _synthesise_ticks(symbol: str, cb, start_price: float = None, interval_s: fl
             pass
 
     return _stop
+
+
+async def subscribe_ticks(client: DerivWebSocketClient, symbol: str, cb):
+    # send subscribe request — must include subscribe: 1 or Deriv answers
+    # with a single one-shot tick instead of a live stream.
+    req = {"ticks": symbol, "subscribe": 1}
+    await client.send(req)
+
+    def _on_msg(msg):
+        # Deriv sends tick objects under 'tick'
+        if isinstance(msg, dict) and msg.get("tick"):
+            t = msg["tick"]
+            tm = TickModel(symbol=symbol, epoch=t.get("epoch"), quote=t.get("quote"))
+            # schedule callback
+            asyncio.create_task(cb(tm))
+
+    unsub = client.add_listener(_on_msg)
+
+    async def unsubscribe():
+        unsub()
+        # send unsubscribe if needed
+        await client.send({"forget": "ticks"})
+
+    return unsubscribe
