@@ -118,7 +118,7 @@ FALLBACK_SYMBOLS = (
     # ── Commodities ────────────────────────────────────────────────────
     ("frxXAUUSD", "Gold / USD", "commodities", "Commodities"),
     ("frxXAGUSD", "Silver / USD", "commodities", "Commodities"),
-    # ── Stock Indices ──────────────────────────────────────────────────
+    # ── Indices ────────────────────────────────────────────────────────
     ("US30", "US Wall Street 30", "indices", "Stock Indices"),
     ("US500", "US 500", "indices", "Stock Indices"),
     ("USTEC", "US Tech 100", "indices", "Stock Indices"),
@@ -141,48 +141,39 @@ FALLBACK_SYMBOLS = (
 def get_fallback_symbols() -> List[SymbolModel]:
     return [
         SymbolModel(
-            symbol=symbol,
-            display_name=display_name,
-            market=market,
-            market_display_name=market_display_name,
-            exchange_is_open=True,
-            is_fallback=True,
+            symbol=s, display_name=d, market=m,
+            market_display_name=md, exchange_is_open=True, is_fallback=True,
         )
-        for symbol, display_name, market, market_display_name in FALLBACK_SYMBOLS
+        for s, d, m, md in FALLBACK_SYMBOLS
     ]
 
 
 async def get_active_symbols(client: DerivWebSocketClient) -> List[SymbolModel]:
-    # "full" includes the market classification and exchange state needed by
-    # clients to distinguish always-open crypto from closed asset classes.
-    req = {
-        "active_symbols": "full",
-        "product_type": "basic",
-        # Deriv uses this landing company to determine the public symbol list.
-        "landing_company_short": "svg",
-    }
-    res = await deriv_request(client, req)
-    symbols = []
-    for s in res.get("active_symbols", []):
-        # Deriv's current API names these fields `underlying_*`; retain the
-        # legacy aliases for compatibility with older WebSocket responses.
-        symbol = s.get("underlying_symbol") or s.get("symbol")
-        if not symbol:
-            continue
-        symbols.append(SymbolModel(
-            symbol=symbol,
-            display_name=s.get("underlying_symbol_name") or s.get("display_name"),
-            market=s.get("market"),
-            market_display_name=s.get("market_display_name") or s.get("submarket"),
-            exchange_is_open=s.get("exchange_is_open"),
-        ))
-    if symbols:
-        return symbols
+    req = {"active_symbols": "brief"}
+    try:
+        res = await deriv_request(client, req, timeout=5)
+        symbols = []
+        for s in res.get("active_symbols", []):
+            market = s.get("market", "").lower()
+            mkt_display = s.get("market_display_name", "")
+            symbols.append(SymbolModel(
+                symbol=s.get("symbol"),
+                display_name=s.get("display_name"),
+                market=market,
+                market_display_name=mkt_display,
+                exchange_is_open=s.get("exchange_is_open", False),
+                is_fallback=False,
+            ))
+        if symbols:
+            return symbols
+    except Exception:
+        logger.exception("Failed to get active symbols from Deriv")
 
     return get_fallback_symbols()
 
 
 async def get_historical_candles(client: DerivWebSocketClient, symbol: str, granularity: int, count: int) -> List[CandleModel]:
+    """Fetch candles from Deriv, falling back to synthesised offline data."""
     req = {
         "ticks_history": symbol,
         "granularity": granularity,
@@ -190,21 +181,30 @@ async def get_historical_candles(client: DerivWebSocketClient, symbol: str, gran
         "count": count,
         "end": "latest",
     }
-    res = await deriv_request(client, req)
-    candles: List[CandleModel] = []
-    candle_items = res.get("candles", [])
-    if isinstance(candle_items, dict):
-        candle_items = candle_items.get("candles", [])
-    for item in candle_items:
-        candles.append(CandleModel(
-            timestamp=datetime.fromtimestamp(item.get("epoch")),
-            open=item.get("open"),
-            high=item.get("high"),
-            low=item.get("low"),
-            close=item.get("close"),
-            volume=item.get("volume"),
-        ))
-    return candles
+    try:
+        res = await deriv_request(client, req, timeout=8)
+        candles: List[CandleModel] = []
+        candle_items = res.get("candles", [])
+        if isinstance(candle_items, dict):
+            candle_items = candle_items.get("candles", [])
+        for item in candle_items:
+            candles.append(CandleModel(
+                timestamp=datetime.fromtimestamp(item.get("epoch")),
+                open=item.get("open"),
+                high=item.get("high"),
+                low=item.get("low"),
+                close=item.get("close"),
+                volume=item.get("volume"),
+            ))
+        if candles:
+            return candles
+    except Exception:
+        logger.warning(
+            "Deriv candle request failed for %s (granularity=%s), using synthesised data",
+            symbol, granularity,
+        )
+    # Fallback: deterministic synthetic candles so the chart always renders
+    return _synthesise_candles(symbol, granularity, count)
 
 
 def _synthesise_ticks(symbol: str, cb, start_price: float = None, interval_s: float = 1.0, granularity: int = 60, tick_vol: float = None):
@@ -227,54 +227,32 @@ def _synthesise_ticks(symbol: str, cb, start_price: float = None, interval_s: fl
     price = anchor
 
     async def _pump():
-        nonlocal price, anchor, vol
+        nonlocal price
         while not stopped:
-            # Mean-reversion: pull 30% of the distance back to the anchor each
-            # tick, then add bounded noise. Keeps the price inside a stable
-            # band around the real close — no runaway tall candles.
-            pull = (anchor - price) * 0.3
-            price = anchor + pull + rng.uniform(-vol, vol)
-            tm = TickModel(
+            # Mean-reverting random walk
+            price += rng.gauss(0, vol)
+            price = price * 0.998 + anchor * 0.002  # pull back toward anchor
+            tick = TickModel(
                 symbol=symbol,
-                epoch=int(time.time()),
                 quote=round(price, 5),
+                timestamp=datetime.now(),
+                epoch=int(time.time()),
             )
             try:
-                await cb(tm)
+                await cb(tick)
             except Exception:
                 pass
             await asyncio.sleep(interval_s)
 
     task = asyncio.create_task(_pump())
 
-    async def unsubscribe():
+    async def _stop():
         nonlocal stopped
         stopped = True
         task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
-    return unsubscribe
-
-
-async def subscribe_ticks(client: DerivWebSocketClient, symbol: str, cb):
-    # send subscribe request — must include subscribe: 1 or Deriv answers
-    # with a single one-shot tick instead of a live stream.
-    req = {"ticks": symbol, "subscribe": 1}
-    await client.send(req)
-
-    def _on_msg(msg):
-        # Deriv sends tick objects under 'tick'
-        if isinstance(msg, dict) and msg.get("tick"):
-            t = msg["tick"]
-            tm = TickModel(symbol=symbol, epoch=t.get("epoch"), quote=t.get("quote"))
-            # schedule callback
-            import asyncio
-            asyncio.create_task(cb(tm))
-
-    unsub = client.add_listener(_on_msg)
-
-    async def unsubscribe():
-        unsub()
-        # send unsubscribe if needed
-        await client.send({"forget": "ticks"})
-
-    return unsubscribe
+    return _stop
