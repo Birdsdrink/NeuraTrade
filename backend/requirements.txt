@@ -5,7 +5,7 @@ pydantic==2.13.4
 
 # ── HTTP / WebSocket clients (Deriv feed + AI providers) ────────────────────
 httpx==0.28.1
-websockets==17.1
+websockets==16.0
 
 # ── AI: Gemini via google-genai ────────────────────────────────────────────
 google-genai>=2.0.0
