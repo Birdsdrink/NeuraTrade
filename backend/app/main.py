@@ -26,6 +26,8 @@ def _get_allowed_origins() -> list[str]:
         "http://10.0.2.2:8081",
         "http://localhost:3000",
         "http://127.0.0.1:3000",
+        "https://neuratrade-98zwnim5w-datalinks-projects.vercel.app",
+        "https://backend-bice-ten-37.vercel.app",
     ]
     return list(dict.fromkeys(origins + defaults))
 
@@ -35,7 +37,7 @@ app = FastAPI(title="Deriv AI Market Analysis Assistant - Backend")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_get_allowed_origins(),
-    allow_origin_regex=r"https?://(localhost|127\.0\.0\.1|0\.0\.0\.0|10\.0\.2\.2|192\.168\.\d+\.\d+)(:\d+)?$",
+    allow_origin_regex=r"https?://(localhost|127\.0\.0\.1|0\.0\.0\.0|10\.0\.2\.2|192\.168\.\d+\.\d+|.*vercel\.app)(:\d+)?$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
