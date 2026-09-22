@@ -1,0 +1,617 @@
+import React, { useEffect, useMemo, useState } from 'react';
+import {
+  ActivityIndicator, StyleSheet, Text, TouchableOpacity, View,
+} from 'react-native';
+import { MaterialCommunityIcons } from '@expo/vector-icons';
+import COLORS from '../../../theme/colors';
+import {
+  DirectionBasis,
+  EconomicEvent,
+  EventImpactLevel,
+} from '../../../domain/entities/EconomicEvent';
+import { useUpcomingEvents } from '../hooks/useUpcomingEvents';
+
+const IMPACT_META: Record<EventImpactLevel, { label: string; color: string }> = {
+  high: { label: 'HIGH', color: COLORS.red },
+  medium: { label: 'MED', color: COLORS.yellow },
+  low: { label: 'LOW', color: COLORS.textMuted },
+  holiday: { label: 'HOL', color: COLORS.textMuted },
+};
+
+const DIRECTION_META = {
+  bullish: { label: 'Bullish', color: COLORS.green, icon: 'trending-up' as const },
+  bearish: { label: 'Bearish', color: COLORS.red, icon: 'trending-down' as const },
+  neutral: { label: 'Neutral', color: COLORS.yellow, icon: 'arrow-right' as const },
+};
+
+const BASIS_LABEL: Record<DirectionBasis, string> = {
+  forecast: 'From consensus vs previous',
+  ai: 'AI read',
+  none: 'No directional edge',
+};
+
+const VOLATILITY_LABEL: Record<string, string> = {
+  high: 'high volatility',
+  medium: 'medium volatility',
+  low: 'low volatility',
+};
+
+function parseScheduled(iso: string): Date | null {
+  if (!iso) return null;
+  const parsed = new Date(iso);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function formatTimeOfDay(date: Date): string {
+  try {
+    return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  } catch {
+    const hours = String(date.getHours()).padStart(2, '0');
+    const minutes = String(date.getMinutes()).padStart(2, '0');
+    return `${hours}:${minutes}`;
+  }
+}
+
+function isSameDay(a: Date, b: Date): boolean {
+  return (
+    a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate()
+  );
+}
+
+function formatDayLabel(date: Date, now: Date): string {
+  if (isSameDay(date, now)) return 'Today';
+  if (isSameDay(date, new Date(now.getTime() + 86_400_000))) return 'Tomorrow';
+  try {
+    return date.toLocaleDateString([], { weekday: 'long', day: 'numeric', month: 'short' });
+  } catch {
+    return date.toDateString();
+  }
+}
+
+function formatCountdown(date: Date, nowMs: number): string {
+  const diff = date.getTime() - nowMs;
+  if (diff <= 0) return 'released';
+  const minutes = Math.floor(diff / 60_000);
+  if (minutes < 1) return 'in under a minute';
+  if (minutes < 60) return `in ${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `in ${hours}h ${minutes % 60}m`;
+  const days = Math.floor(hours / 24);
+  return `in ${days}d ${hours % 24}h`;
+}
+
+type Props = {
+  symbol?: string | null;
+  displayName?: string;
+};
+
+export default function UpcomingEventsSection({ symbol, displayName }: Props) {
+  const { data, isLoading, isError, error, refetch, isRefetching } = useUpcomingEvents(symbol, displayName);
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  const [currencyFilter, setCurrencyFilter] = useState<string>('all');
+
+  // Countdowns stay honest without re-rendering on every frame.
+  useEffect(() => {
+    const timer = setInterval(() => setNowMs(Date.now()), 30_000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const currencies = useMemo(() => {
+    const seen = new Set<string>();
+    (data?.events ?? []).forEach((event) => {
+      if (event.currency) seen.add(event.currency);
+    });
+    return Array.from(seen).sort();
+  }, [data]);
+
+  const events = useMemo(() => {
+    const all = data?.events ?? [];
+    return currencyFilter === 'all' ? all : all.filter((event) => event.currency === currencyFilter);
+  }, [data, currencyFilter]);
+
+  const groups = useMemo(() => {
+    const now = new Date(nowMs);
+    const map = new Map<string, { label: string; events: EconomicEvent[] }>();
+    events.forEach((event) => {
+      const date = parseScheduled(event.scheduledAt);
+      const key = date ? `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}` : 'unknown';
+      if (!map.has(key)) {
+        map.set(key, { label: date ? formatDayLabel(date, now) : 'Scheduled', events: [] });
+      }
+      map.get(key)!.events.push(event);
+    });
+    return Array.from(map.values());
+  }, [events, nowMs]);
+
+  if (isLoading && !data) {
+    return (
+      <View style={styles.card}>
+        <View style={styles.labelRow}>
+          <MaterialCommunityIcons name="calendar-clock" size={16} color={COLORS.purple} />
+          <Text style={styles.labelText}>UPCOMING EVENTS</Text>
+        </View>
+        <View style={styles.centered}>
+          <ActivityIndicator color={COLORS.purple} />
+          <Text style={styles.loadingText}>
+            Loading the economic calendar{symbol ? ` and assessing impact on ${displayName ?? symbol}` : ''}…
+          </Text>
+          <Text style={styles.loadingHint}>The price-impact read is generated by AI, so this can take a moment.</Text>
+        </View>
+      </View>
+    );
+  }
+
+  if (isError || !data) {
+    return (
+      <View style={styles.card}>
+        <View style={styles.labelRow}>
+          <MaterialCommunityIcons name="calendar-alert" size={16} color={COLORS.red} />
+          <Text style={[styles.labelText, { color: COLORS.red }]}>UPCOMING EVENTS</Text>
+        </View>
+        <Text style={styles.errorText}>
+          {(error as Error)?.message ?? 'Could not load the economic calendar.'}
+        </Text>
+        <TouchableOpacity style={styles.retryButton} onPress={() => refetch()} activeOpacity={0.85}>
+          <MaterialCommunityIcons name="refresh" size={15} color={COLORS.textSecondary} />
+          <Text style={styles.retryText}>Try again</Text>
+        </TouchableOpacity>
+      </View>
+    );
+  }
+
+  const isEstimatedSource = data.source === 'estimated';
+  const sourceColor = isEstimatedSource ? COLORS.yellow : COLORS.green;
+  const sourceLabel = isEstimatedSource ? 'ESTIMATED' : data.source === 'live' ? 'LIVE CALENDAR' : 'UNAVAILABLE';
+
+  return (
+    <View>
+      <View style={styles.card}>
+        <View style={styles.rowBetween}>
+          <View style={styles.labelRow}>
+            <MaterialCommunityIcons name="calendar-clock" size={16} color={COLORS.purple} />
+            <Text style={styles.labelText}>UPCOMING EVENTS</Text>
+          </View>
+          <View style={[styles.pill, { borderColor: sourceColor + '55', backgroundColor: sourceColor + '18' }]}>
+            <Text style={[styles.pillText, { color: sourceColor }]}>{sourceLabel}</Text>
+          </View>
+        </View>
+
+        <Text style={styles.headline}>{data.summary.headline}</Text>
+
+        <View style={styles.metaRow}>
+          <Text style={styles.metaText}>
+            {data.summary.eventCount} release{data.summary.eventCount === 1 ? '' : 's'} · next {data.windowDays} days
+          </Text>
+        </View>
+        <View style={styles.metaRow}>
+          {data.summary.highImpactCount > 0 ? (
+            <Text style={[styles.metaText, { color: COLORS.red }]}>
+              {data.summary.highImpactCount} high-impact
+            </Text>
+          ) : null}
+          {data.aiRated ? (
+            <Text style={[styles.metaText, { color: COLORS.purple }]}>· AI impact read</Text>
+          ) : null}
+          {isEstimatedSource ? (
+            <Text style={[styles.metaText, { color: COLORS.yellow }]}>· estimated dates</Text>
+          ) : null}
+        </View>
+
+        <TouchableOpacity
+          style={styles.refreshInline}
+          onPress={() => refetch()}
+          activeOpacity={0.8}
+          disabled={isRefetching}
+        >
+          <MaterialCommunityIcons
+            name="refresh"
+            size={13}
+            color={isRefetching ? COLORS.textMuted : COLORS.textSecondary}
+          />
+          <Text style={[styles.refreshInlineText, isRefetching && { color: COLORS.textMuted }]}>
+            {isRefetching ? 'Refreshing…' : 'Refresh'}
+          </Text>
+        </TouchableOpacity>
+      </View>
+
+      {currencies.length > 1 ? (
+        <View style={styles.filterRow}>
+          {['all', ...currencies].map((code) => {
+            const active = currencyFilter === code;
+            return (
+              <TouchableOpacity
+                key={code}
+                onPress={() => setCurrencyFilter(code)}
+                style={[styles.filterChip, active && styles.filterChipActive]}
+                activeOpacity={0.8}
+              >
+                <Text style={[styles.filterChipText, active && styles.filterChipTextActive]}>
+                  {code === 'all' ? 'All currencies' : code}
+                </Text>
+              </TouchableOpacity>
+            );
+          })}
+        </View>
+      ) : null}
+
+      {groups.length === 0 ? (
+        <View style={styles.card}>
+          <Text style={styles.emptyText}>
+            No scheduled releases match this instrument in the next {data.windowDays} days.
+          </Text>
+        </View>
+      ) : (
+        groups.map((group) => (
+          <View key={group.label} style={styles.group}>
+            <Text style={styles.groupLabel}>{group.label.toUpperCase()}</Text>
+            {group.events.map((event) => (
+              <EventCard key={event.id} event={event} nowMs={nowMs} />
+            ))}
+          </View>
+        ))
+      )}
+
+      {data.warnings.length > 0 ? (
+        <View style={[styles.card, { borderColor: COLORS.yellow + '33' }]}>
+          {data.warnings.map((warning, index) => (
+            <View key={index} style={styles.warningRow}>
+              <MaterialCommunityIcons name="information-outline" size={13} color={COLORS.yellow} />
+              <Text style={styles.warningText}>{warning}</Text>
+            </View>
+          ))}
+        </View>
+      ) : null}
+
+      <Text style={styles.disclaimer}>
+        Directional impact is model and consensus judgement about a future release, not a forecast, and
+        can be wrong when the actual data surprises.
+      </Text>
+    </View>
+  );
+}
+
+function EventCard({ event, nowMs }: { event: EconomicEvent; nowMs: number }) {
+  const scheduled = parseScheduled(event.scheduledAt);
+  const impact = IMPACT_META[event.impactLevel] ?? IMPACT_META.low;
+  const direction = DIRECTION_META[event.direction] ?? DIRECTION_META.neutral;
+
+  return (
+    <View style={styles.eventCard}>
+      <View style={styles.eventTopRow}>
+        <Text style={styles.eventTime}>{scheduled ? formatTimeOfDay(scheduled) : '--:--'}</Text>
+        {scheduled ? <Text style={styles.countdown}>{formatCountdown(scheduled, nowMs)}</Text> : null}
+        <View style={{ flex: 1 }} />
+        {event.currency ? (
+          <View style={styles.currencyChip}>
+            <Text style={styles.currencyChipText}>{event.currency}</Text>
+          </View>
+        ) : null}
+        <View style={[styles.impactChip, { backgroundColor: impact.color + '1F', borderColor: impact.color + '55' }]}>
+          <Text style={[styles.impactChipText, { color: impact.color }]}>{impact.label}</Text>
+        </View>
+      </View>
+
+      <Text style={styles.eventTitle}>{event.title}</Text>
+
+      <View style={styles.directionRow}>
+        <View style={[styles.directionPill, { backgroundColor: direction.color + '1A', borderColor: direction.color + '44' }]}>
+          <MaterialCommunityIcons name={direction.icon} size={13} color={direction.color} />
+          <Text style={[styles.directionText, { color: direction.color }]}>{direction.label}</Text>
+        </View>
+        {event.directionConfidence > 0 ? (
+          <Text style={styles.directionMeta}>{event.directionConfidence}% confidence</Text>
+        ) : (
+          <Text style={styles.directionMeta}>{VOLATILITY_LABEL[event.volatility] ?? 'volatility unknown'}</Text>
+        )}
+        <Text style={styles.directionMeta}>
+          {event.directionConfidence > 0 ? `· ${VOLATILITY_LABEL[event.volatility] ?? ''}` : ''}
+        </Text>
+      </View>
+
+      {event.reason ? <Text style={styles.reason}>{event.reason}</Text> : null}
+
+      {event.playbook ? (
+        <View style={styles.playbookRow}>
+          <MaterialCommunityIcons name="lightbulb-on-outline" size={13} color={COLORS.cyan} style={styles.playbookIcon} />
+          <Text style={styles.playbookText}>{event.playbook}</Text>
+        </View>
+      ) : null}
+
+      {event.forecast || event.previous ? (
+        <View style={styles.numbersRow}>
+          {event.forecast ? <Text style={styles.numberText}>Forecast {event.forecast}</Text> : null}
+          {event.previous ? <Text style={styles.numberText}>Previous {event.previous}</Text> : null}
+        </View>
+      ) : null}
+
+      <Text style={styles.basisText}>
+        {BASIS_LABEL[event.directionBasis] ?? ''}
+        {event.estimated ? ' · estimated date' : ''}
+      </Text>
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  card: {
+    backgroundColor: COLORS.cardBg,
+    borderRadius: 18,
+    padding: 16,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: COLORS.subtleBorder,
+  },
+  rowBetween: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  labelRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  labelText: {
+    color: COLORS.purple,
+    fontWeight: '700',
+    fontSize: 11,
+    letterSpacing: 0.6,
+    marginLeft: 6,
+  },
+  pill: {
+    borderRadius: 8,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderWidth: 1,
+  },
+  pillText: {
+    fontSize: 9.5,
+    fontWeight: '800',
+    letterSpacing: 0.5,
+  },
+  headline: {
+    color: COLORS.textPrimary,
+    fontSize: 14,
+    fontWeight: '700',
+    lineHeight: 20,
+    marginTop: 10,
+  },
+  metaRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    marginTop: 6,
+  },
+  metaText: {
+    color: COLORS.textMuted,
+    fontSize: 11.5,
+    marginRight: 6,
+  },
+  refreshInline: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 10,
+    alignSelf: 'flex-start',
+  },
+  refreshInlineText: {
+    color: COLORS.textSecondary,
+    fontSize: 11.5,
+    fontWeight: '600',
+    marginLeft: 5,
+  },
+  filterRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    marginBottom: 10,
+  },
+  filterChip: {
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: 10,
+    backgroundColor: COLORS.cardBg,
+    borderWidth: 1,
+    borderColor: COLORS.subtleBorder,
+    marginRight: 6,
+    marginBottom: 6,
+  },
+  filterChipActive: {
+    backgroundColor: COLORS.purple + '22',
+    borderColor: COLORS.purple,
+  },
+  filterChipText: {
+    color: COLORS.textSecondary,
+    fontSize: 11.5,
+    fontWeight: '700',
+  },
+  filterChipTextActive: {
+    color: COLORS.purple,
+  },
+  group: {
+    marginBottom: 6,
+  },
+  groupLabel: {
+    color: COLORS.textMuted,
+    fontSize: 10,
+    fontWeight: '700',
+    letterSpacing: 1,
+    marginBottom: 6,
+    marginTop: 4,
+  },
+  eventCard: {
+    backgroundColor: COLORS.bgSecondary,
+    borderRadius: 14,
+    padding: 13,
+    marginBottom: 8,
+    borderWidth: 1,
+    borderColor: COLORS.subtleBorder,
+  },
+  eventTopRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  eventTime: {
+    color: COLORS.textPrimary,
+    fontSize: 13,
+    fontWeight: '800',
+  },
+  countdown: {
+    color: COLORS.textMuted,
+    fontSize: 11,
+    marginLeft: 7,
+  },
+  currencyChip: {
+    borderRadius: 6,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    backgroundColor: COLORS.blue + '1A',
+    borderWidth: 1,
+    borderColor: COLORS.blue + '44',
+    marginRight: 5,
+  },
+  currencyChipText: {
+    color: COLORS.blue,
+    fontSize: 9.5,
+    fontWeight: '800',
+  },
+  impactChip: {
+    borderRadius: 6,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderWidth: 1,
+  },
+  impactChipText: {
+    fontSize: 9.5,
+    fontWeight: '800',
+    letterSpacing: 0.4,
+  },
+  eventTitle: {
+    color: COLORS.textPrimary,
+    fontSize: 13,
+    fontWeight: '600',
+    marginTop: 7,
+    lineHeight: 18,
+  },
+  directionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 8,
+    flexWrap: 'wrap',
+  },
+  directionPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderRadius: 8,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderWidth: 1,
+    marginRight: 8,
+  },
+  directionText: {
+    fontSize: 11,
+    fontWeight: '800',
+    marginLeft: 4,
+  },
+  directionMeta: {
+    color: COLORS.textMuted,
+    fontSize: 11,
+    marginRight: 6,
+  },
+  reason: {
+    color: COLORS.textSecondary,
+    fontSize: 11.5,
+    lineHeight: 16,
+    marginTop: 8,
+  },
+  playbookRow: {
+    flexDirection: 'row',
+    marginTop: 8,
+    paddingLeft: 2,
+  },
+  playbookIcon: {
+    marginTop: 1,
+    marginRight: 6,
+  },
+  playbookText: {
+    color: COLORS.textSecondary,
+    fontSize: 11.5,
+    lineHeight: 16,
+    flex: 1,
+  },
+  numbersRow: {
+    flexDirection: 'row',
+    marginTop: 8,
+  },
+  numberText: {
+    color: COLORS.textMuted,
+    fontSize: 11,
+    marginRight: 12,
+  },
+  basisText: {
+    color: COLORS.textMuted,
+    fontSize: 10,
+    marginTop: 7,
+    fontStyle: 'italic',
+  },
+  centered: {
+    alignItems: 'center',
+    paddingVertical: 26,
+  },
+  loadingText: {
+    color: COLORS.textSecondary,
+    fontSize: 12.5,
+    marginTop: 10,
+    textAlign: 'center',
+  },
+  loadingHint: {
+    color: COLORS.textMuted,
+    fontSize: 11,
+    marginTop: 4,
+    textAlign: 'center',
+  },
+  errorText: {
+    color: COLORS.textSecondary,
+    fontSize: 12.5,
+    marginTop: 10,
+    lineHeight: 18,
+  },
+  retryButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    alignSelf: 'flex-start',
+    marginTop: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: COLORS.subtleBorder,
+    backgroundColor: COLORS.cardBg,
+  },
+  retryText: {
+    color: COLORS.textSecondary,
+    fontSize: 12,
+    fontWeight: '700',
+    marginLeft: 6,
+  },
+  emptyText: {
+    color: COLORS.textSecondary,
+    fontSize: 12.5,
+    lineHeight: 18,
+  },
+  warningRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    marginBottom: 6,
+  },
+  warningText: {
+    color: COLORS.textSecondary,
+    fontSize: 11.5,
+    lineHeight: 16,
+    flex: 1,
+    marginLeft: 6,
+  },
+  disclaimer: {
+    color: COLORS.textMuted,
+    fontSize: 10.5,
+    lineHeight: 15,
+    marginBottom: 8,
+    paddingHorizontal: 2,
+  },
+});

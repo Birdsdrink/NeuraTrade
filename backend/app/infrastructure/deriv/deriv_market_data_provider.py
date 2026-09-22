@@ -32,10 +32,20 @@ class DerivMarketDataProvider(MarketDataProvider):
     async def get_historical_candles(self, symbol: str, timeframe_seconds: int, count: int) -> List[CandleModel]:
         return await get_historical_candles(self.client, symbol, timeframe_seconds, count)
 
-    async def subscribe_ticks(self, symbol: str, callback: Callable):
+    async def subscribe_ticks(self, symbol: str, callback: Callable, timeframe_seconds: int = 60):
         # Use the same direct Deriv feed as historical OHLC. Timeframe
         # bucketing is performed by the frontend's live-candle update layer.
-        await self.client.connect()
+        # Nudge the socket open WITHOUT waiting for it. When the machine has no
+        # working route to Deriv, connect() retries with an exponential backoff
+        # for minutes — awaiting it here would stall the whole tick generator
+        # and the client would receive no ticks at all, live or synthetic.
+        async def _ensure_connected():
+            try:
+                await self.client.connect()
+            except Exception:
+                pass
+
+        asyncio.create_task(_ensure_connected())
 
         # wrap callback to accept TickModel
         async def _cb(tick: TickModel):
@@ -51,7 +61,11 @@ class DerivMarketDataProvider(MarketDataProvider):
             await _cb(tick)
 
         try:
-            real_unsub = await subscribe_ticks(self.client, symbol, _delivering_cb)
+            # Bounded: an unreachable upstream must not hold the generator here,
+            # or the watchdog below never gets to start the synthetic pump.
+            real_unsub = await asyncio.wait_for(
+                subscribe_ticks(self.client, symbol, _delivering_cb), timeout=2
+            )
         except Exception:
             real_unsub = None
 
@@ -83,7 +97,7 @@ class DerivMarketDataProvider(MarketDataProvider):
             anchor = None
             tick_vol = None
             try:
-                candles = await get_historical_candles(self.client, symbol, 60, 30)
+                candles = await get_historical_candles(self.client, symbol, timeframe_seconds, 30)
                 if candles:
                     anchor = candles[-1].close
                     ranges = [
@@ -96,7 +110,10 @@ class DerivMarketDataProvider(MarketDataProvider):
                         tick_vol = avg_range * 0.25
             except Exception:
                 anchor = None
-            synth_stop = _synthesise_ticks(symbol, callback, start_price=anchor, tick_vol=tick_vol)
+            synth_stop = _synthesise_ticks(
+                symbol, callback, start_price=anchor, tick_vol=tick_vol,
+                granularity=timeframe_seconds,
+            )
 
         asyncio.create_task(_watchdog())
 

@@ -20,6 +20,18 @@ function getTickWsUrl(symbol: string, timeframeSeconds: number): string {
 }
 
 /**
+ * URL of the server's completed-candle stream. The backend buckets this stream
+ * by `timeframeSeconds`, so the timeframe selected in the UI is what the server
+ * closes bars on.
+ */
+function getMarketWsUrl(symbol: string, timeframeSeconds: number): string {
+  const apiUrl =
+    (process.env.EXPO_PUBLIC_API_BASE_URL as string) || 'http://localhost:8000/api';
+  const base = `${apiUrl.replace(/^http/, 'ws').replace(/\/$/, '')}/ws/market/${encodeURIComponent(symbol)}`;
+  return `${base}?timeframe_seconds=${timeframeSeconds}`;
+}
+
+/**
  * Return the floor timestamp (in ms) of the candle bucket for `ts`
  * given a timeframe in seconds.
  */
@@ -28,14 +40,62 @@ function candleBucket(ts: number, timeframeSeconds: number): number {
   return Math.floor(ts / bucketMs) * bucketMs;
 }
 
+/**
+ * Collapse duplicate buckets (the server can legitimately re-send a bar the tick
+ * stream already opened) keeping the last value, and guarantee ascending order.
+ * Element identity is preserved so the chart can memoise untouched bars.
+ */
+function dedupeByBucket(list: Candle[], timeframeSeconds: number): Candle[] {
+  if (list.length === 0) return list;
+  const byBucket = new Map<number, Candle>();
+  for (const candle of list) {
+    byBucket.set(candleBucket(candle.timestamp, timeframeSeconds), candle);
+  }
+  // Same length means every bucket appeared once and the list was already in
+  // order — reuse the original array rather than churning identity.
+  if (byBucket.size === list.length) return list;
+  return [...byBucket.values()].sort((a, b) => a.timestamp - b.timestamp);
+}
+
 export function useLiveCandles(
   symbol: string,
   timeframeSeconds: number,
   historicalCandles: Candle[],
 ) {
   const [candles, setCandles] = useState<Candle[]>([]);
+  const [livePrice, setLivePrice] = useState<number | null>(null);
+  const [isLive, setIsLive] = useState(false);
   const liveRef = useRef<Candle[]>([]);
   const histLenRef = useRef(0);
+
+  /**
+   * Merge a bar that arrived over the server's candle stream into the series.
+   * A bar for a bucket we already hold is replaced (the server has closed it),
+   * a newer bucket is appended, and anything older is dropped so a late message
+   * can never rewrite history the user is looking at.
+   */
+  const upsertCandle = useCallback((incoming: Candle) => {
+    const current = liveRef.current;
+    const bucket = candleBucket(incoming.timestamp, timeframeSeconds);
+    const index = current.findIndex(
+      (candle) => candleBucket(candle.timestamp, timeframeSeconds) === bucket,
+    );
+    let updated: Candle[];
+    if (index >= 0) {
+      updated = [...current];
+      updated[index] = { ...updated[index], ...incoming };
+    } else if (
+      current.length === 0
+      || bucket > candleBucket(current[current.length - 1].timestamp, timeframeSeconds)
+    ) {
+      updated = [...current, incoming];
+    } else {
+      return;
+    }
+    if (updated.length > 200) updated = updated.slice(-200);
+    liveRef.current = updated;
+    setCandles(updated);
+  }, [timeframeSeconds]);
 
   // Stabilize historical candles reference — only replace the live base when
   // historical data actually changes.  Keep the ref undefined initially so a
@@ -75,9 +135,10 @@ export function useLiveCandles(
     } else {
       merged = base;
     }
-    liveRef.current = [...merged];
-    histLenRef.current = merged.length;
-    setCandles([...merged]);
+    const ordered = dedupeByBucket(merged, timeframeSeconds);
+    liveRef.current = ordered;
+    histLenRef.current = ordered.length;
+    setCandles(ordered);
   }, [histJson, timeframeSeconds]);
 
   // WebSocket tick stream
@@ -87,20 +148,17 @@ export function useLiveCandles(
     let stopped = false;
     let socket: WebSocket | undefined;
     let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
-    // On hosts without WebSocket support (e.g. serverless backends) give up after a few
-    // failed opens and rely on the parent's REST refresh — but keep reconnecting forever
-    // once a connection has ever succeeded (transient drops on a real WS backend).
-    let attempts = 0;
-    let hasConnectedOnce = false;
-    const MAX_ATTEMPTS = 3;
+    // The local FastAPI backend serves WebSockets, so never give up: retry with a
+    // capped backoff when the backend restarts or the phone drops off the LAN.
+    // Giving up permanently is what leaves the forming candle stuck.
+    let retryDelay = 1000;
 
     const connect = () => {
       if (stopped) return;
-      attempts += 1;
       const url = getTickWsUrl(symbol, timeframeSeconds);
       socket = new WebSocket(url);
 
-      socket.onopen = () => { hasConnectedOnce = true; /* connected */ };
+      socket.onopen = () => { retryDelay = 1000; setIsLive(true); };
 
       socket.onmessage = (event) => {
         try {
@@ -108,6 +166,7 @@ export function useLiveCandles(
           const price: number | undefined = tick.quote ?? tick.price;
           const tickTime: number = tick.timestamp ?? (typeof tick.epoch === 'number' ? tick.epoch * 1000 : Date.now());
           if (typeof price !== 'number' || price <= 0) return;
+          setLivePrice(price);
 
           const current = liveRef.current;
           if (current.length === 0) return;
@@ -155,9 +214,10 @@ export function useLiveCandles(
       };
 
       socket.onclose = () => {
-        if (!stopped && (hasConnectedOnce || attempts < MAX_ATTEMPTS)) {
-          reconnectTimer = setTimeout(connect, 2000);
-        }
+        setIsLive(false);
+        if (stopped) return;
+        reconnectTimer = setTimeout(connect, retryDelay);
+        retryDelay = Math.min(15000, retryDelay * 2);
       };
 
       socket.onerror = () => socket?.close();
@@ -172,5 +232,57 @@ export function useLiveCandles(
     };
   }, [symbol, timeframeSeconds]);
 
-  return { candles };
+  // Completed-candle stream: the server pushes each bar as it closes, so the
+  // chart no longer waits for the next REST poll to show a finished candle. The
+  // tick stream above keeps the forming bar moving in between.
+  useEffect(() => {
+    if (!symbol || !timeframeSeconds) return;
+
+    let stopped = false;
+    let socket: WebSocket | undefined;
+    let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+    let retryDelay = 1000;
+
+    const connect = () => {
+      if (stopped) return;
+      socket = new WebSocket(getMarketWsUrl(symbol, timeframeSeconds));
+      socket.onopen = () => { retryDelay = 1000; };
+      socket.onmessage = (event) => {
+        try {
+          const raw = JSON.parse(event.data as string);
+          const timestamp = typeof raw?.timestamp === 'number'
+            ? raw.timestamp
+            : Date.parse(raw?.timestamp);
+          const candle: Candle = {
+            timestamp,
+            open: Number(raw?.open),
+            high: Number(raw?.high),
+            low: Number(raw?.low),
+            close: Number(raw?.close),
+            volume: raw?.volume == null ? undefined : Number(raw.volume),
+          };
+          if (!Number.isFinite(candle.timestamp) || !Number.isFinite(candle.close)) return;
+          upsertCandle(candle);
+        } catch {
+          /* ignore malformed messages */
+        }
+      };
+      socket.onclose = () => {
+        if (stopped) return;
+        reconnectTimer = setTimeout(connect, retryDelay);
+        retryDelay = Math.min(15000, retryDelay * 2);
+      };
+      socket.onerror = () => socket?.close();
+    };
+
+    connect();
+
+    return () => {
+      stopped = true;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      socket?.close();
+    };
+  }, [symbol, timeframeSeconds, upsertCandle]);
+
+  return { candles, livePrice, isLive };
 }

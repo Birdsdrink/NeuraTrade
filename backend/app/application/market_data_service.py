@@ -6,7 +6,7 @@ from ..infrastructure.deriv.deriv_market_data import subscribe_ticks, get_histor
 from ..infrastructure.deriv.candle_builder import CandleBuilder
 from ..infrastructure.deriv.deriv_mapper import map_candle_model_to_domain
 from ..infrastructure.deriv.models import TickModel
-from datetime import datetime
+from datetime import datetime, timezone
 
 
 class MarketDataService:
@@ -30,10 +30,10 @@ class MarketDataService:
             finished = cb.add_tick(tick)
             for f in finished:
                 # map to domain and call
-                dom = DomainCandle(timestamp=datetime.fromtimestamp(f["ts"]), open=f["open"], high=f["high"], low=f["low"], close=f["close"], volume=f.get("volume"))
+                dom = DomainCandle(timestamp=datetime.fromtimestamp(f["ts"], tz=timezone.utc), open=f["open"], high=f["high"], low=f["low"], close=f["close"], volume=f.get("volume"))
                 await callback(dom)
 
-        unsub = await self.provider.subscribe_ticks(symbol, _on_tick)
+        unsub = await self.provider.subscribe_ticks(symbol, _on_tick, timeframe_seconds)
 
         async def _unsubscribe():
             try:

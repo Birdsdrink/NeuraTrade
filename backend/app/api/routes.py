@@ -14,6 +14,7 @@ from ..infrastructure.ai.vision_service import (
     analyse_candles_dashboard,
 )
 from ..infrastructure.ai.fundamental_service import analyse_fundamental
+from ..infrastructure.calendar.economic_calendar import get_upcoming_events
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -80,7 +81,7 @@ async def market_health(request: Request):
 
 
 @router.websocket("/ws/market/{symbol}")
-async def market_ws(websocket: WebSocket, symbol: str):
+async def market_ws(websocket: WebSocket, symbol: str, timeframe_seconds: int = 60):
     await websocket.accept()
 
     service: MarketDataService = websocket.app.state.market_data_service
@@ -99,7 +100,7 @@ async def market_ws(websocket: WebSocket, symbol: str):
             # client gone, unsubscribe will be handled by outer except
             pass
 
-    unsub = await service.subscribe_candles(symbol, 60, send_candle)
+    unsub = await service.subscribe_candles(symbol, timeframe_seconds, send_candle)
 
     try:
         while True:
@@ -109,7 +110,7 @@ async def market_ws(websocket: WebSocket, symbol: str):
 
 
 @router.websocket("/ws/ticks/{symbol}")
-async def tick_ws(websocket: WebSocket, symbol: str):
+async def tick_ws(websocket: WebSocket, symbol: str, timeframe_seconds: int = 60):
     """Stream live quotes so clients can animate the currently forming candle."""
     await websocket.accept()
     provider = websocket.app.state.market_data_provider
@@ -122,7 +123,7 @@ async def tick_ws(websocket: WebSocket, symbol: str):
         })
 
     try:
-        unsub = await provider.subscribe_ticks(symbol, send_tick)
+        unsub = await provider.subscribe_ticks(symbol, send_tick, timeframe_seconds)
     except Exception:
         await websocket.close(code=1011, reason="Market data is unavailable")
         return
@@ -247,6 +248,46 @@ _DASHBOARD_FALLBACK = {
 class FundamentalAnalysisRequest(BaseModel):
     symbol: str
     display_name: str = ""
+
+
+@router.get("/upcoming-events")
+async def upcoming_events(
+    symbol: str = "",
+    display_name: str = "",
+    days: int = 7,
+    min_impact: str = "medium",
+):
+    """Scheduled economic releases for an instrument and their expected price impact.
+
+    The calendar is limited to the current week upstream; when the live feed is
+    unreachable (or has nothing left in the window) the service falls back to
+    recurring releases, flagged `estimated` in the payload.
+    Always returns a well-formed payload (never a bare 500) so the mobile News
+    screen can render a graceful degraded state with the reason.
+    """
+    try:
+        return await get_upcoming_events(symbol, display_name, days, min_impact)
+    except Exception:
+        logger.exception("Upcoming events request failed")
+        return {
+            "symbol": symbol,
+            "instrument": display_name or symbol,
+            "currencies": [],
+            "source": "unavailable",
+            "generated_at": None,
+            "window_days": days,
+            "min_impact": min_impact,
+            "ai_rated": False,
+            "events": [],
+            "summary": {
+                "event_count": 0,
+                "high_impact_count": 0,
+                "next_event": None,
+                "next_high_impact": None,
+                "headline": "Economic calendar temporarily unavailable.",
+            },
+            "warnings": ["Could not load the economic calendar."],
+        }
 
 
 @router.post("/fundamental-analysis")

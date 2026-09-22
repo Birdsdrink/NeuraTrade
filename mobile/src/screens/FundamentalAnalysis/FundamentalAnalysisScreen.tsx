@@ -11,6 +11,9 @@ import { Market } from '../../domain/entities/Market';
 import { aiClient } from '../../services/api/apiClient';
 import { useSettings } from '../../hooks/useSettings';
 import { maybeSendAlignedSignalNotification, updateNewsSignal } from '../../services/signalNotifications';
+import UpcomingEventsSection from '../../features/news/components/UpcomingEventsSection';
+
+type NewsView = 'news' | 'events';
 
 type NewsImpact = {
   headline: string;
@@ -154,6 +157,7 @@ export default function FundamentalAnalysisScreen({
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [showResults, setShowResults] = useState(false);
+  const [view, setView] = useState<NewsView>('news');
   const { data: markets = [] } = useMarkets();
   const normalizedResult = normalizeFundamentalResult(result);
 
@@ -290,7 +294,20 @@ export default function FundamentalAnalysisScreen({
           </View>
         </View>
 
-        {loading && (
+        <View style={{ paddingHorizontal: 20 }}>
+          <SegmentedTabs value={view} onChange={setView} />
+        </View>
+
+        {view === 'events' && (
+          <View style={{ paddingHorizontal: 20 }}>
+            <UpcomingEventsSection
+              symbol={selectedMarket?.symbol ?? null}
+              displayName={selectedMarket?.displayName}
+            />
+          </View>
+        )}
+
+        {view === 'news' && loading && (
           <View style={{ alignItems: 'center', paddingVertical: 40 }}>
             <ActivityIndicator size="large" color={COLORS.purple} />
             <Text style={{ color: COLORS.textSecondary, fontSize: 13, marginTop: 12 }}>
@@ -302,7 +319,7 @@ export default function FundamentalAnalysisScreen({
           </View>
         )}
 
-        {normalizedResult && !loading && (
+        {view === 'news' && normalizedResult && !loading && (
           <>
             <Card style={{ borderColor: sentimentColor + '30' }}>
               <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start' }}>
@@ -489,6 +506,8 @@ export default function FundamentalAnalysisScreen({
     >
       <AppHeader title="Fundamental Analysis" subtitle="AI-powered news sentiment" />
 
+      <SegmentedTabs value={view} onChange={setView} />
+
       <View style={{ marginBottom: 16 }}>
         <Text style={{ color: COLORS.textMuted, fontSize: 11, fontWeight: '700', marginBottom: 8, letterSpacing: 0.8 }}>SELECT INSTRUMENT</Text>
         <View style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: COLORS.cardBg, borderRadius: 14, paddingHorizontal: 12, paddingVertical: 10, marginBottom: 12, borderWidth: 1, borderColor: COLORS.subtleBorder }}>
@@ -531,7 +550,14 @@ export default function FundamentalAnalysisScreen({
         </ScrollView>
       </View>
 
-      {!result && !loading && (
+      {view === 'events' && (
+        <UpcomingEventsSection
+          symbol={selectedMarket?.symbol ?? null}
+          displayName={selectedMarket?.displayName}
+        />
+      )}
+
+      {view === 'news' && !result && !loading && (
         <View>
           {Object.entries(grouped).slice(0, 8).map(([category, items]) => (
             <View key={category} style={{ marginBottom: 12 }}>
@@ -574,3 +600,70 @@ const Label = ({ children, style }: { children: React.ReactNode; style?: any }) 
 const Divider = () => (
   <View style={{ borderTopWidth: 1, borderTopColor: COLORS.subtleBorder, marginVertical: 12 }} />
 );
+
+/** "News & Sentiment" / "Upcoming Events" switch for the News tab. */
+const SegmentedTabs = ({ value, onChange }: { value: NewsView; onChange: (next: NewsView) => void }) => {
+  const options: {
+    key: NewsView;
+    label: string;
+    icon: 'newspaper-variant-outline' | 'calendar-clock';
+  }[] = [
+    { key: 'news', label: 'News & Sentiment', icon: 'newspaper-variant-outline' },
+    { key: 'events', label: 'Upcoming Events', icon: 'calendar-clock' },
+  ];
+
+  return (
+    <View
+      style={{
+        flexDirection: 'row',
+        backgroundColor: COLORS.cardBg,
+        borderRadius: 14,
+        padding: 4,
+        marginBottom: 14,
+        borderWidth: 1,
+        borderColor: COLORS.subtleBorder,
+      }}
+    >
+      {options.map((option) => {
+        const active = option.key === value;
+        return (
+          <TouchableOpacity
+            key={option.key}
+            onPress={() => onChange(option.key)}
+            activeOpacity={0.85}
+            accessibilityRole="button"
+            accessibilityState={{ selected: active }}
+            style={{
+              flex: 1,
+              flexDirection: 'row',
+              alignItems: 'center',
+              justifyContent: 'center',
+              paddingVertical: 9,
+              borderRadius: 11,
+              backgroundColor: active ? COLORS.purple + '22' : 'transparent',
+              borderWidth: 1,
+              borderColor: active ? COLORS.purple + '66' : 'transparent',
+            }}
+          >
+            <MaterialCommunityIcons
+              name={option.icon}
+              size={15}
+              color={active ? COLORS.purple : COLORS.textMuted}
+            />
+            <Text
+              numberOfLines={1}
+              style={{
+                marginLeft: 6,
+                fontSize: 12,
+                fontWeight: '700',
+                color: active ? COLORS.purple : COLORS.textSecondary,
+              }}
+            >
+              {option.label}
+            </Text>
+          </TouchableOpacity>
+        );
+      })}
+    </View>
+  );
+};

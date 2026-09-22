@@ -1,9 +1,10 @@
 import asyncio
 import logging
+import math
 import random
 import time
 from typing import List
-from datetime import datetime
+from datetime import datetime, timezone
 from .deriv_client import deriv_request, DerivWebSocketClient
 from .models import CandleModel, TickModel, SymbolModel
 
@@ -13,6 +14,13 @@ logger = logging.getLogger(__name__)
 # Rough per-symbol reference prices used only to seed the offline candle
 # synthesizer when the Deriv WebSocket is unreachable (local dev / blocked
 # networks). Real Deriv data is always preferred when available.
+#
+# Wavelengths of the two noise octaves that shape the offline price curve.
+# The slow one draws the trends, the fast one adds pullbacks and varying bar
+# sizes — a single octave renders as an unnaturally even sine wave.
+_ANCHOR_SPAN = 18
+_FAST_SPAN = 6
+_FAST_WEIGHT = 0.45
 _REFERENCE_PRICE = {
     "frxEURUSD": 1.09, "frxGBPUSD": 1.27, "frxUSDJPY": 155.0,
     "frxAUDUSD": 0.66, "frxUSDCAD": 1.36, "frxUSDCHF": 0.88,
@@ -23,50 +31,100 @@ _REFERENCE_PRICE = {
 }
 
 
+def _anchor_offset(symbol: str, granularity: int, tag: str) -> float:
+    """Seeded random offset in the range -1..1 for a named anchor point."""
+    rng = random.Random(f"{symbol}:{granularity}:anchor:{tag}")
+    return rng.uniform(-1.0, 1.0)
+
+
+def _value_noise(symbol: str, granularity: int, bucket: int, span: int) -> float:
+    """Smoothstep-interpolated value noise in -1..1 with wavelength ``span``.
+
+    Interpolating between seeded anchors keeps the curve continuous (open of
+    each candle equals the previous close) while still being a pure function of
+    the bucket, so the series never shifts between refetches.
+    """
+    left = bucket // span
+    t = (bucket - left * span) / span
+    smooth = t * t * (3.0 - 2.0 * t)  # no corners at the anchors
+    a0 = _anchor_offset(symbol, granularity, f"{span}:{left}")
+    a1 = _anchor_offset(symbol, granularity, f"{span}:{left + 1}")
+    return a0 + (a1 - a0) * smooth
+
+
 def _close_for_bucket(symbol: str, granularity: int, bucket: int) -> float:
     """Deterministic close price for an absolute time bucket.
 
-    Each bucket's close is a pure function of (symbol, granularity, bucket), so
-    ANY fetch of the same instrument/timeframe returns the identical series and
-    the LAST candle is identical regardless of how many candles were requested.
-    This is what keeps historical candles pinned to their price level across
-    refetches and lets the live tick stream anchor exactly onto the last close.
+    The curve is smooth value noise: one seeded offset every ``_ANCHOR_SPAN``
+    buckets, smoothstep-interpolated in between, plus a slow sine trend. It is
+    still a pure function of (symbol, granularity, bucket), so ANY fetch of the
+    same instrument/timeframe returns the identical series and the LAST candle
+    is identical regardless of how many candles were requested — which keeps
+    history pinned across refetches and lets the live tick stream anchor exactly
+    onto the real last close.
+
+    Continuity matters for looks: an independent random draw per bucket renders
+    as a sawtooth of unrelated closes (a "messy" chart), not a market.
     """
     base = _REFERENCE_PRICE.get(symbol, 100.0)
-    rng = random.Random(f"{symbol}:{granularity}:{bucket}")
-    # vol is an ABSOLUTE price offset (e.g. ±64 for BTC, ±0.0009 for EUR/USD),
-    # so it must be ADDED to base — using it as a multiplier would inflate
-    # high-priced instruments by tens of times.
-    vol = max(base * 0.0008, 0.0005)
-    return base + rng.uniform(-vol, vol)
+    # amp is an ABSOLUTE price offset (≈0.4% of price), so it must be ADDED to
+    # base — using it as a multiplier would inflate high-priced instruments by
+    # tens of times.
+    amp = max(base * 0.004, 0.0004)
+    noise = (
+        _value_noise(symbol, granularity, bucket, _ANCHOR_SPAN)
+        + _FAST_WEIGHT * _value_noise(symbol, granularity, bucket, _FAST_SPAN)
+    )
+    # Slow trend so the series drifts instead of only oscillating in place.
+    trend = 0.5 * math.sin(2.0 * math.pi * bucket / (_ANCHOR_SPAN * 30.0))
+    return base + (noise + trend) * amp
 
 
 def _synthesise_candles(symbol: str, granularity: int, count: int) -> List[CandleModel]:
     """Generate plausible offline candles so analysis endpoints still answer.
 
-    Candles are built per absolute time bucket (see ``_close_for_bucket``), so
-    the series is stable across refetches and independent of the requested
-    count. Candle ``i`` opens at the previous bucket's close and closes at its
-    own bucket's close, giving a continuous, MT-like series. Candles are
-    flagged clearly via a trailing ``volume`` of -1 so callers can detect
-    synthetic data (volume of -1 is impossible from a live feed).
+    Produces a smooth, zigzagging price series where each candle opens at the
+    previous candle's close (continuity) and closes at its own deterministic
+    price. The body is a meaningful fraction of the candle's range so bars look
+    like real candlesticks, not thin needles. Candles are flagged with a
+    ``volume`` of -1 so callers can detect synthetic data.
     """
     now = int(time.time())
     current_bucket = now // granularity
+    base_price = _REFERENCE_PRICE.get(symbol, 100.0)
+    amp = max(base_price * 0.0012, 0.0003)  # ~0.12% body amplitude per bar
+
+    def _next_close(bucket: int) -> float:
+        return _close_for_bucket(symbol, granularity, bucket)
+
     candles: List[CandleModel] = []
+    prev_close: float | None = None
     for k in range(count, 0, -1):
         bucket = current_bucket - k  # completed buckets, oldest -> newest
-        open_p = _close_for_bucket(symbol, granularity, bucket - 1)
-        close_p = _close_for_bucket(symbol, granularity, bucket)
-        drift = close_p - open_p
-        # Wick factor from a per-bucket rng (keeps the series deterministic).
-        wick = random.Random(f"{symbol}:{granularity}:w:{bucket}").uniform(0.3, 1.2)
-        high = max(open_p, close_p) + abs(drift) * wick
-        low = min(open_p, close_p) - abs(drift) * wick
-        # Bucket-aligned timestamps: the last candle sits at the most recent
-        # completed period so the live forming candle buckets cleanly next to it.
+        close_p = _next_close(bucket)
+        # Open at the previous close (or close to it) so the series connects.
+        if prev_close is None:
+            open_p = close_p  # first bar: no prior close
+        else:
+            open_p = prev_close
+        # Ensure body is visible: if open ≈ close (dojibar), add a tiny nudge.
+        body = abs(close_p - open_p)
+        if body < amp * 0.15:
+            nudge = random.Random(f"{symbol}:{granularity}:nudge:{bucket}").uniform(amp * 0.15, amp * 0.5)
+            if close_p >= open_p:
+                close_p = open_p + nudge
+            else:
+                close_p = open_p - nudge
+            body = abs(close_p - open_p)
+        # Wicks: proportional to the body, not a fixed minimum.
+        rng = random.Random(f"{symbol}:{granularity}:w:{bucket}")
+        wick_ratio = rng.uniform(0.2, 0.6)  # wick = 20-60% of body
+        wick = max(body * wick_ratio, base_price * 0.00005)  # tiny floor
+        high = max(open_p, close_p) + wick
+        low = min(open_p, close_p) - wick
+        prev_close = close_p
         candles.append(CandleModel(
-            timestamp=datetime.fromtimestamp(bucket * granularity),
+            timestamp=datetime.fromtimestamp(bucket * granularity, tz=timezone.utc),
             open=round(open_p, 5),
             high=round(high, 5),
             low=round(low, 5),
@@ -118,7 +176,7 @@ FALLBACK_SYMBOLS = (
     # ── Commodities ────────────────────────────────────────────────────
     ("frxXAUUSD", "Gold / USD", "commodities", "Commodities"),
     ("frxXAGUSD", "Silver / USD", "commodities", "Commodities"),
-    # ── Indices ────────────────────────────────────────────────────────
+    # ── Stock Indices ──────────────────────────────────────────────────
     ("US30", "US Wall Street 30", "indices", "Stock Indices"),
     ("US500", "US 500", "indices", "Stock Indices"),
     ("USTEC", "US Tech 100", "indices", "Stock Indices"),
@@ -141,33 +199,43 @@ FALLBACK_SYMBOLS = (
 def get_fallback_symbols() -> List[SymbolModel]:
     return [
         SymbolModel(
-            symbol=s, display_name=d, market=m,
-            market_display_name=md, exchange_is_open=True, is_fallback=True,
+            symbol=symbol,
+            display_name=display_name,
+            market=market,
+            market_display_name=market_display_name,
+            exchange_is_open=True,
+            is_fallback=True,
         )
-        for s, d, m, md in FALLBACK_SYMBOLS
+        for symbol, display_name, market, market_display_name in FALLBACK_SYMBOLS
     ]
 
 
 async def get_active_symbols(client: DerivWebSocketClient) -> List[SymbolModel]:
-    req = {"active_symbols": "brief"}
-    try:
-        res = await deriv_request(client, req, timeout=5)
-        symbols = []
-        for s in res.get("active_symbols", []):
-            market = s.get("market", "").lower()
-            mkt_display = s.get("market_display_name", "")
-            symbols.append(SymbolModel(
-                symbol=s.get("symbol"),
-                display_name=s.get("display_name"),
-                market=market,
-                market_display_name=mkt_display,
-                exchange_is_open=s.get("exchange_is_open", False),
-                is_fallback=False,
-            ))
-        if symbols:
-            return symbols
-    except Exception:
-        logger.exception("Failed to get active symbols from Deriv")
+    # "full" includes the market classification and exchange state needed by
+    # clients to distinguish always-open crypto from closed asset classes.
+    req = {
+        "active_symbols": "full",
+        "product_type": "basic",
+        # Deriv uses this landing company to determine the public symbol list.
+        "landing_company_short": "svg",
+    }
+    res = await deriv_request(client, req, timeout=3)
+    symbols = []
+    for s in res.get("active_symbols", []):
+        # Deriv's current API names these fields `underlying_*`; retain the
+        # legacy aliases for compatibility with older WebSocket responses.
+        symbol = s.get("underlying_symbol") or s.get("symbol")
+        if not symbol:
+            continue
+        symbols.append(SymbolModel(
+            symbol=symbol,
+            display_name=s.get("underlying_symbol_name") or s.get("display_name"),
+            market=s.get("market"),
+            market_display_name=s.get("market_display_name") or s.get("submarket"),
+            exchange_is_open=s.get("exchange_is_open"),
+        ))
+    if symbols:
+        return symbols
 
     return get_fallback_symbols()
 
@@ -182,14 +250,14 @@ async def get_historical_candles(client: DerivWebSocketClient, symbol: str, gran
         "end": "latest",
     }
     try:
-        res = await deriv_request(client, req, timeout=8)
+        res = await deriv_request(client, req, timeout=5)
         candles: List[CandleModel] = []
         candle_items = res.get("candles", [])
         if isinstance(candle_items, dict):
             candle_items = candle_items.get("candles", [])
         for item in candle_items:
             candles.append(CandleModel(
-                timestamp=datetime.fromtimestamp(item.get("epoch")),
+                timestamp=datetime.fromtimestamp(item.get("epoch"), tz=timezone.utc),
                 open=item.get("open"),
                 high=item.get("high"),
                 low=item.get("low"),
@@ -203,7 +271,6 @@ async def get_historical_candles(client: DerivWebSocketClient, symbol: str, gran
             "Deriv candle request failed for %s (granularity=%s), using synthesised data",
             symbol, granularity,
         )
-    # Fallback: deterministic synthetic candles so the chart always renders
     return _synthesise_candles(symbol, granularity, count)
 
 
@@ -219,43 +286,46 @@ def _synthesise_ticks(symbol: str, cb, start_price: float = None, interval_s: fl
     range; when omitted a conservative default is used.
     Returns an async unsubscribe callable.
     """
-    base = _REFERENCE_PRICE.get(symbol, 100.0)
-    anchor = start_price if start_price is not None and start_price > 0 else base
+    anchor = (
+        start_price
+        if start_price is not None and start_price > 0
+        # With no real close to anchor on, continue the same offline series the
+        # historical endpoint serves — anchoring on the bare reference price
+        # would make the forming bar jump away from the chart it continues.
+        else _close_for_bucket(symbol, granularity, int(time.time()) // granularity - 1)
+    )
     vol = tick_vol if tick_vol is not None else max(anchor * 0.0002, 0.0001)
     rng = random.Random(f"{symbol}:live")
     stopped = False
     price = anchor
 
     async def _pump():
-        nonlocal price
+        nonlocal price, anchor, vol
         while not stopped:
-            # Mean-reverting random walk
-            price += rng.gauss(0, vol)
-            price = price * 0.998 + anchor * 0.002  # pull back toward anchor
-            tick = TickModel(
+            # Mean-reversion: pull 30% of the distance back to the anchor each
+            # tick, then add bounded noise. Keeps the price inside a stable
+            # band around the real close — no runaway tall candles.
+            pull = (anchor - price) * 0.3
+            price = anchor + pull + rng.uniform(-vol, vol)
+            tm = TickModel(
                 symbol=symbol,
-                quote=round(price, 5),
-                timestamp=datetime.now(),
                 epoch=int(time.time()),
+                quote=round(price, 5),
             )
             try:
-                await cb(tick)
+                await cb(tm)
             except Exception:
                 pass
             await asyncio.sleep(interval_s)
 
     task = asyncio.create_task(_pump())
 
-    async def _stop():
+    async def unsubscribe():
         nonlocal stopped
         stopped = True
         task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
 
-    return _stop
+    return unsubscribe
 
 
 async def subscribe_ticks(client: DerivWebSocketClient, symbol: str, cb):
@@ -270,6 +340,7 @@ async def subscribe_ticks(client: DerivWebSocketClient, symbol: str, cb):
             t = msg["tick"]
             tm = TickModel(symbol=symbol, epoch=t.get("epoch"), quote=t.get("quote"))
             # schedule callback
+            import asyncio
             asyncio.create_task(cb(tm))
 
     unsub = client.add_listener(_on_msg)

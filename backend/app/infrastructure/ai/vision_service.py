@@ -7,7 +7,7 @@ Uses Google Gemini via the google-genai SDK for all LLM calls:
 
 Configure via environment variables:
   GEMINI_API_KEY  – Google AI API key
-  GEMINI_MODEL    – Gemini model id (default: gemini-2.5-flash)
+  GEMINI_MODEL    – Gemini model id (default: gemini-3.6-flash)
 """
 
 import os

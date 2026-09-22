@@ -16,7 +16,7 @@ class MarketDataProvider(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    async def subscribe_ticks(self, symbol: str, callback):
+    async def subscribe_ticks(self, symbol: str, callback, timeframe_seconds: int = 60):
         """
         Subscribe to tick updates for `symbol`.
         `callback` is an async callable that receives a TickModel.

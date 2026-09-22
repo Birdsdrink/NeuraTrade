@@ -1,15 +1,13 @@
 """Fundamental analysis service.
 
 Fetches financial news for a given instrument via Google News RSS feeds,
-then sends the headlines + summary to the AI model (same providers as vision_service)
-to produce a structured buy/sell/wait fundamental verdict.
+then sends the headlines + summary to Gemini to produce a structured
+buy/sell/wait fundamental verdict.
 """
 
-import os
 import re
 import json
 import logging
-import asyncio
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -20,26 +18,22 @@ from xml.etree import ElementTree
 
 import httpx
 
+from .llm_client import (
+    HAS_GEMINI,
+    LLMUnavailable,
+    call_gemini,
+    call_llm_json,
+    parse_json,
+)
+
 logger = logging.getLogger(__name__)
 
-# ── Provider config (shared with vision_service) ─────────────────────────────
-
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
-OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "openai/gpt-4o-mini")
-OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-
-GEMINI_API_KEY = os.getenv("AI_API_KEY", "") or os.getenv("GEMINI_API_KEY", "")
-GEMINI_MODEL = os.getenv("AI_MODEL", "gemini-2.5-flash") or os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
-GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta"
-
-HAS_OPENROUTER = bool(OPENROUTER_API_KEY)
-HAS_GEMINI = bool(GEMINI_API_KEY)
-
-# Provider connectivity cache
-_or_ok: Optional[bool] = None
-_gemini_ok: Optional[bool] = None
-
-logger.info("Fundamental service init: HAS_OPENROUTER=%s, HAS_GEMINI=%s", HAS_OPENROUTER, HAS_GEMINI)
+# Gemini configuration, the failure cooldown and the JSON parser live in
+# llm_client, shared with the event-impact feature.
+#
+# Gemini is the only provider here.  OpenRouter was removed because the account
+# had no credit (every request returned 402) and the extra hop only added
+# latency and an OpenAI/Qwen dependency this page does not use.
 
 # ── Symbol → search terms mapping ────────────────────────────────────────────
 
@@ -306,39 +300,18 @@ ANALYSIS_SCHEMA = json.dumps({
 # ── AI call ──────────────────────────────────────────────────────────────────
 
 async def _call_ai(prompt: str) -> dict:
-    """Call AI via OpenRouter first, fall back to Gemini."""
-    global _or_ok, _gemini_ok
+    """Call Gemini, degrading to a neutral verdict when it is unavailable."""
+    try:
+        return await call_llm_json(prompt)
+    except LLMUnavailable as exc:
+        logger.warning("Fundamental: Gemini unavailable (%s); returning neutral verdict", exc)
 
-    if HAS_OPENROUTER and _or_ok is not False:
-        try:
-            result = await _call_openrouter(prompt)
-            _or_ok = True
-            logger.info("Fundamental: OpenRouter call succeeded")
-            return result
-        except Exception as e:
-            logger.warning("Fundamental: OpenRouter failed (%s), trying Gemini", type(e).__name__)
-            _or_ok = False
-
-    if HAS_GEMINI and _gemini_ok is not False:
-        for attempt in range(3):
-            try:
-                result = await _call_gemini(prompt)
-                _gemini_ok = True
-                logger.info("Fundamental: Gemini call succeeded (attempt %d)", attempt + 1)
-                return result
-            except Exception as e:
-                if attempt < 2:
-                    await asyncio.sleep(2 ** (attempt + 1))
-                else:
-                    logger.exception("Fundamental: Gemini failed after retries")
-                    _gemini_ok = False
-
-    if not HAS_OPENROUTER and not HAS_GEMINI:
-        analysis = "No live AI provider is configured. Set OPENROUTER_API_KEY or AI_API_KEY."
-        warnings = ["No API keys configured."]
+    if not HAS_GEMINI:
+        analysis = "No Gemini API key is configured. Set AI_API_KEY or GEMINI_API_KEY."
+        warnings = ["No Gemini API key is configured."]
     else:
-        analysis = "Live AI providers are configured but the request failed; the app is using the fallback analysis path."
-        warnings = ["AI provider request failed; fallback analysis is being shown."]
+        analysis = "Gemini is unavailable or rate-limited right now, so a reduced fundamental read is being shown."
+        warnings = ["Gemini request failed; a reduced analysis is being shown."]
 
     return {
         "instrument": "",
@@ -359,67 +332,9 @@ async def _call_ai(prompt: str) -> dict:
     }
 
 
-async def _call_openrouter(prompt: str) -> dict:
-    models = [os.getenv("OPENROUTER_MODEL", OPENROUTER_MODEL), "openai/gpt-4o-mini", "google/gemini-2.5-flash"]
-    seen = set()
-    for model in models:
-        if not model or model in seen:
-            continue
-        seen.add(model)
-        payload = {
-            "model": model,
-            "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": 1536,
-            "temperature": 0.1,
-        }
-        headers = {
-            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-            "Content-Type": "application/json",
-            "HTTP-Referer": "https://ai-trading-assistant.local",
-            "X-Title": "AI Trading Assistant",
-        }
-        try:
-            async with httpx.AsyncClient(timeout=120) as client:
-                resp = await client.post(OPENROUTER_URL, json=payload, headers=headers)
-                resp.raise_for_status()
-                body = resp.json()
-            raw = body["choices"][0]["message"]["content"].strip()
-            return _parse_json(raw)
-        except Exception as exc:
-            logger.warning("OpenRouter model %s failed: %s", model, exc)
-
-    raise RuntimeError("OpenRouter requests failed for all available models")
-
-
-async def _call_gemini(prompt: str) -> dict:
-    models = [os.getenv("AI_MODEL", GEMINI_MODEL), os.getenv("GEMINI_MODEL", GEMINI_MODEL), "gemini-2.5-flash", "gemini-2.0-flash"]
-    seen = set()
-    for model in models:
-        if not model or model in seen:
-            continue
-        seen.add(model)
-        url = f"{GEMINI_URL}/models/{model}:generateContent?key={GEMINI_API_KEY}"
-        payload = {
-            "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {"maxOutputTokens": 1536, "temperature": 0.1},
-        }
-        try:
-            async with httpx.AsyncClient(timeout=90) as client:
-                resp = await client.post(url, json=payload)
-                resp.raise_for_status()
-                body = resp.json()
-            candidates = body.get("candidates", [])
-            if not candidates:
-                raise ValueError("Gemini returned no candidates")
-            parts = candidates[0].get("content", {}).get("parts", [])
-            raw = "".join(p.get("text", "") for p in parts).strip()
-            if not raw:
-                raise ValueError("Gemini returned empty text")
-            return _parse_json(raw)
-        except Exception as exc:
-            logger.warning("Gemini model %s failed: %s", model, exc)
-
-    raise RuntimeError("Gemini requests failed for all available models")
+# Gemini calls now live in llm_client; this alias keeps the local debug script
+# (debug_fundamental_probe.py) working.
+_call_gemini = call_gemini
 
 
 def _stringify_value(value) -> str:
@@ -448,48 +363,8 @@ def _stringify_value(value) -> str:
     return str(value)
 
 
-def _parse_json(raw: str) -> dict:
-    """Robust JSON parsing for LLM output."""
-    raw = raw.strip()
-    # Strip markdown fences
-    cleaned = re.sub(r"^```(?:json|JSON)?\s*\n?", "", raw)
-    cleaned = re.sub(r"\n?\s*```\s*$", "", cleaned)
-    cleaned = cleaned.strip()
-    cleaned = re.sub(r",\s*([}\]])", r"\1", cleaned)
-
-    try:
-        return json.loads(cleaned)
-    except (json.JSONDecodeError, ValueError):
-        pass
-
-    # Try extracting JSON object
-    start = raw.find('{')
-    end = raw.rfind('}')
-    if start >= 0 and end > start:
-        candidate = raw[start:end + 1]
-        try:
-            return json.loads(candidate)
-        except (json.JSONDecodeError, ValueError):
-            pass
-
-    logger.warning("Could not parse fundamental analysis JSON. First 200: %s", raw[:200])
-    return {
-        "instrument": "",
-        "sentiment": "neutral",
-        "sentiment_score": 0,
-        "confidence": 0,
-        "recommendation": "WAIT",
-        "bias": "Analysis unavailable",
-        "key_themes": [],
-        "news_impact": [],
-        "economic_factors": [],
-        "central_bank_outlook": "",
-        "geopolitical_risk": "",
-        "analysis": raw[:500] if raw else "Empty response.",
-        "reasons": [],
-        "warnings": ["Could not parse AI response."],
-        "news_count": 0,
-    }
+# The robust JSON parser also moved to llm_client (as `parse_json`).
+_parse_json = parse_json
 
 
 # ── Public API ───────────────────────────────────────────────────────────────
@@ -546,7 +421,10 @@ async def analyse_fundamental(
 
     result = await _call_ai(prompt)
 
-    if (not HAS_OPENROUTER and not HAS_GEMINI) or result.get("recommendation") == "WAIT" and result.get("warnings") == ["No API keys configured."]:
+    if not HAS_GEMINI or (
+        result.get("recommendation") == "WAIT"
+        and result.get("warnings") == ["No Gemini API key is configured."]
+    ):
         result = {
             "instrument": instrument_name,
             "sentiment": "neutral",

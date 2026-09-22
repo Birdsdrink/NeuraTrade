@@ -14,16 +14,13 @@ export function useLiveTick(symbol: string) {
     let stopped = false;
     let socket: WebSocket | undefined;
     let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
-    // On hosts without WebSocket support (e.g. serverless backends) give up after a few
-    // failed opens and rely on REST polling instead — but keep reconnecting forever once
-    // a connection has ever succeeded (transient drops on a real WS backend).
-    let attempts = 0;
-    let hasConnectedOnce = false;
-    const MAX_ATTEMPTS = 3;
+    // The local FastAPI backend serves WebSockets, so never give up: retry with a
+    // capped backoff when the backend restarts or the phone drops off the LAN.
+    // Silently stopping after a few attempts is what leaves the price frozen.
+    let retryDelay = 1000;
     const connect = () => {
-      attempts += 1;
       socket = new WebSocket(getTickUrl(symbol));
-      socket.onopen = () => { hasConnectedOnce = true; setIsLive(true); };
+      socket.onopen = () => { retryDelay = 1000; setIsLive(true); };
       socket.onmessage = (event) => {
         try {
           const tick = JSON.parse(event.data as string);
@@ -32,9 +29,9 @@ export function useLiveTick(symbol: string) {
       };
       socket.onclose = () => {
         setIsLive(false);
-        if (!stopped && (hasConnectedOnce || attempts < MAX_ATTEMPTS)) {
-          reconnectTimer = setTimeout(connect, 3000);
-        }
+        if (stopped) return;
+        reconnectTimer = setTimeout(connect, retryDelay);
+        retryDelay = Math.min(15000, retryDelay * 2);
       };
       socket.onerror = () => socket?.close();
     };

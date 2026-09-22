@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import time
 from typing import Any, Dict, Callable
 
 import websockets
@@ -8,6 +9,19 @@ import websockets
 logger = logging.getLogger(__name__)
 
 DERIV_WS_URL = "wss://ws.binaryws.com/websockets/v3?app_id=1089"
+
+# Give up on the TLS/WebSocket handshake quickly. The default is 10s, which is
+# an eternity to wait when the machine has no working route to the internet.
+_OPEN_TIMEOUT_SECONDS = 5
+
+# Seconds to stop asking Deriv for data after a failed attempt (see the circuit
+# breaker in `deriv_request`).
+_OFFLINE_COOLDOWN_SECONDS = 20.0
+
+# How long a request may wait for an already in-flight handshake before falling
+# back. Keeps offline requests at ~1.5s instead of the full upstream timeout.
+_CONNECT_GRACE_SECONDS = 1.5
+_offline_until = 0.0
 
 
 class DerivWebSocketClient:
@@ -33,7 +47,7 @@ class DerivWebSocketClient:
             while not self._closed:
                 try:
                     logger.info("Connecting to Deriv WS: %s", self.url)
-                    self._ws = await websockets.connect(self.url)
+                    self._ws = await websockets.connect(self.url, open_timeout=_OPEN_TIMEOUT_SECONDS)
                     self._connected.set()
                     self._recv_task = asyncio.create_task(self._recv_loop())
                     logger.info("Connected to Deriv WS")
@@ -95,6 +109,18 @@ class DerivWebSocketClient:
             await self.connect()
             await self._ws.send(payload_json)
 
+    async def wait_connected(self, timeout: float) -> bool:
+        """Wait up to ``timeout`` for the socket to come up; True once it is.
+
+        Lets callers bound how long they will wait on an unreachable upstream
+        instead of blocking on the connection event indefinitely.
+        """
+        try:
+            await asyncio.wait_for(self._connected.wait(), timeout=timeout)
+            return True
+        except asyncio.TimeoutError:
+            return False
+
     def add_listener(self, cb: Callable[[Any], Any]):
         """Register a listener callback. Returns an unsubscribe callable."""
         self._listeners.append(cb)
@@ -123,6 +149,20 @@ class DerivWebSocketClient:
 
 
 async def deriv_request(client: DerivWebSocketClient, req: Dict[str, Any], timeout: int = 10) -> Dict[str, Any]:
+    global _offline_until
+
+    # Circuit breaker first: while this machine has no route to Deriv, every
+    # request would otherwise pay the upstream timeout again before falling
+    # back, making the market list and the candlestick chart feel frozen. After
+    # one failure, fail instantly for a short cooldown instead.
+    if time.monotonic() < _offline_until:
+        raise ConnectionError("Deriv is unreachable; request skipped during cooldown")
+
+    if not client.is_connected and not await client.wait_connected(_CONNECT_GRACE_SECONDS):
+        # Nothing to send to: fail immediately instead of waiting out `timeout`.
+        _offline_until = time.monotonic() + _OFFLINE_COOLDOWN_SECONDS
+        raise ConnectionError("Deriv socket is not connected; request skipped")
+
     fut = asyncio.get_event_loop().create_future()
 
     async def cb(msg):
@@ -136,6 +176,15 @@ async def deriv_request(client: DerivWebSocketClient, req: Dict[str, Any], timeo
         # forever on the client's connection event.
         await asyncio.wait_for(client.send(req), timeout=timeout)
         res = await asyncio.wait_for(fut, timeout=timeout)
+        # A response means the upstream works again (Deriv reports its own
+        # errors inside the payload, which does not reach this branch).
+        _offline_until = 0.0
         return res
+    except (Exception, asyncio.CancelledError):
+        # CancelledError derives from BaseException (not Exception), and it is
+        # exactly what an outer asyncio.wait_for timeout raises — without it the
+        # cooldown would never arm and every request would rewait the timeout.
+        _offline_until = time.monotonic() + _OFFLINE_COOLDOWN_SECONDS
+        raise
     finally:
         unsubscribe()

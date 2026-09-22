@@ -5,7 +5,6 @@ import COLORS from '../../theme/colors';
 import AppHeader from '../../components/AppHeader';
 import { useMarketDetail } from '../../features/markets/hooks/useMarketDetail';
 import { useLiveCandles } from '../../features/markets/hooks/useLiveCandles';
-import { useLiveTick } from '../../features/markets/hooks/useLiveTick';
 import { Market } from '../../domain/entities/Market';
 import { useSettings } from '../../hooks/useSettings';
 import CandlestickChart from '../../components/CandlestickChart';
@@ -31,14 +30,18 @@ export default function MarketDetailScreen({ navigation, market, onOpenAnalysis 
   const displayName = market?.displayName ?? market?.symbol ?? 'Market';
 
   const { data: historicalCandles = [] } = useMarketDetail(symbol, TIMEFRAMES[timeframe] ?? 3600, settings.defaultCandleCount, settings.refreshInterval);
-  const { candles } = useLiveCandles(symbol, TIMEFRAMES[timeframe] ?? 3600, historicalCandles);
-  const { livePrice, isLive } = useLiveTick(symbol);
+  // The live price, the live indicator and the forming candle all come from the
+  // one shared WebSocket stream, so this screen no longer opens a second socket
+  // per symbol for the price header.
+  const { candles, livePrice, isLive } = useLiveCandles(symbol, TIMEFRAMES[timeframe] ?? 3600, historicalCandles);
 
+  // The backend marks offline placeholder candles with a volume of -1, which a
+  // real feed can never produce. Surface it instead of letting fabricated
+  // prices pass for live market data.
   const latestCandle = candles[candles.length - 1];
-  const firstCandle = candles[0];
   const currentPrice = livePrice ?? latestCandle?.close ?? null;
-  const change = latestCandle && firstCandle && firstCandle.close !== 0
-    ? ((latestCandle.close - firstCandle.close) / firstCandle.close) * 100
+  const change = latestCandle && candles.length > 1 && candles[0].close !== 0
+    ? ((latestCandle.close - candles[0].close) / candles[0].close) * 100
     : null;
 
   return (
@@ -74,6 +77,7 @@ export default function MarketDetailScreen({ navigation, market, onOpenAnalysis 
               {change >= 0 ? '+' : ''}{change.toFixed(2)}%
             </Text>
           )}
+
         </View>
       </View>
 
@@ -96,7 +100,11 @@ export default function MarketDetailScreen({ navigation, market, onOpenAnalysis 
       </ScrollView>
 
       {/* Live Candlestick chart */}
-      <CandlestickChart candles={candles} livePrice={livePrice} />
+      <CandlestickChart
+        candles={candles}
+        livePrice={livePrice}
+        timeframeSeconds={TIMEFRAMES[timeframe] ?? 3600}
+      />
 
       {/* AI Action Buttons */}
       <View style={{ paddingHorizontal: 16 }}>
